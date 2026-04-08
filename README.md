@@ -1,3 +1,13 @@
+---
+title: Cloud Cost Optimizer
+emoji: 🚀
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Cloud Cost Optimizer - OpenEnv Environment
 
 ## Overview
