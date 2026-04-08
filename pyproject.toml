@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "cloud-cost-optimizer"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "openenv-core[core]>=0.2.1",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "openai",
+    "requests",
+    "python-dotenv",
+]
+
+[project.scripts]
+server = "server.app:main"
