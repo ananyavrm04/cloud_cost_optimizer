@@ -1,0 +1,10 @@
+spec_version: 1
+name: cloud_cost_optimizer
+type: step_reset
+description: >
+  AI agent optimizes cloud infrastructure costs by terminating idle
+  servers, right-sizing instances, and switching pricing plans while
+  maintaining SLA uptime guarantees.
+runtime: docker
+app: server.app:app
+port: 7860
