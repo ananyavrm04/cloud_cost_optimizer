@@ -177,7 +177,9 @@ def call_llm(user_prompt: str) -> dict:
 
 
 def compute_score(state) -> float:
-    eps = 1e-6
+    # Keep scores strictly inside (0, 1) even after 4-decimal formatting.
+    # If eps is too small (e.g. 1e-6), `:.4f` can still print 1.0000 or 0.0000.
+    eps = 1e-3
     if not state.optimal_savings or state.optimal_savings <= 0:
         return eps
     score = state.total_savings / state.optimal_savings
