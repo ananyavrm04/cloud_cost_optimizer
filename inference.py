@@ -190,7 +190,7 @@ def compute_score(state) -> float:
 
 
 def run_task(task_id: str) -> float:
-    print(f"START task={task_id}")
+    print(f"[START] task={task_id}", flush=True)
     with CloudCostEnv(base_url=ENV_URL).sync() as env:
         reset_result = env.reset(task_id=task_id)
         observation = (
@@ -198,6 +198,7 @@ def run_task(task_id: str) -> float:
             if hasattr(reset_result, "observation")
             else reset_result
         )
+        steps_executed = 0
         for step_idx in range(1, MAX_STEPS + 1):
             raw_action = call_llm(build_user_prompt(observation))
             action_data = normalize_action(raw_action, observation)
@@ -209,27 +210,27 @@ def run_task(task_id: str) -> float:
             )
             result = env.step(action)
             observation = result.observation
+            steps_executed = step_idx
             print(
-                f"STEP task={task_id} step={step_idx} action={action.action_type} "
-                f"target={action.resource_id or '-'} reward={result.reward:.4f} done={result.done}"
+                f"[STEP] task={task_id} step={step_idx} action={action.action_type} "
+                f"target={action.resource_id or '-'} reward={result.reward:.4f} done={result.done}",
+                flush=True,
             )
             if result.done:
                 break
         score = compute_score(env.state())
-        print(f"END task={task_id} score={score:.4f}")
+        print(f"[END] task={task_id} score={score:.4f} steps={steps_executed}", flush=True)
         return score
 
 
 if __name__ == "__main__":
     mode = "LLM+heuristic" if USE_LLM else "heuristic-only"
-    print(f"Inference mode: {mode}")
+    print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
     for task_id in ["easy", "medium", "hard"]:
-        print(f"Running task: {task_id}")
         score = run_task(task_id)
         scores[task_id] = score
-        print(f"Task {task_id}: score = {score:.4f}")
-
-    print("--- Final Scores ---")
-    for task_id in ["easy", "medium", "hard"]:
-        print(f"{task_id}: {scores[task_id]:.4f}")
+    print(
+        f"[SUMMARY] easy={scores['easy']:.4f} medium={scores['medium']:.4f} hard={scores['hard']:.4f}",
+        flush=True,
+    )
