@@ -177,13 +177,14 @@ def call_llm(user_prompt: str) -> dict:
 
 
 def compute_score(state) -> float:
+    eps = 1e-6
     if not state.optimal_savings or state.optimal_savings <= 0:
-        return 0.0
+        return eps
     score = state.total_savings / state.optimal_savings
-    score = max(0.0, min(1.0, score))
+    score = max(eps, min(1.0 - eps, score))
     if state.sla_violated:
         score = min(score, 0.3)
-    return score
+    return max(eps, min(1.0 - eps, score))
 
 
 def run_task(task_id: str) -> float:
