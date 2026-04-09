@@ -183,7 +183,7 @@ score = agent_savings / optimal_savings
    ```bash
    export API_BASE_URL="https://your-llm-api/v1"
    export MODEL_NAME="your-model-name"
-   export HF_TOKEN="your-hf-token"
+   export API_KEY="your-proxy-api-key"
    export ENV_URL="http://localhost:7860"
    
    python inference.py
@@ -194,10 +194,9 @@ score = agent_savings / optimal_savings
 | Variable | Description |
 |----------|-------------|
 | `API_BASE_URL` | OpenAI-compatible LLM endpoint (required) |
+| `API_KEY` | API key for the above endpoint (required) |
 | `MODEL_NAME` | Model identifier (required) |
-| `HF_TOKEN` | Hugging Face API token (required) |
 | `ENV_URL` | Server URL; defaults to `http://localhost:7860` (optional) |
-| `USE_LLM` | `1` to enable LLM calls; default `0` (heuristic-only, no credit spend) |
 
 ---
 
