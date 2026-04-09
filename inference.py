@@ -11,21 +11,20 @@ from models import CloudCostAction
 load_dotenv()
 
 # Validator-aligned env handling:
-# - defaults only for API_BASE_URL and MODEL_NAME
-# - no default for HF_TOKEN
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+# - API_BASE_URL and API_KEY must come from injected env vars
+# - MODEL_NAME keeps a local-friendly default
+if "API_BASE_URL" not in os.environ or "API_KEY" not in os.environ:
+    raise RuntimeError("Missing required env vars: API_BASE_URL and API_KEY")
+
+API_BASE_URL = os.environ["API_BASE_URL"]
 MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-20b:fastest")
-HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = os.environ["API_KEY"]
 ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
-USE_LLM = os.environ.get("USE_LLM", "0").strip().lower() in {"1", "true", "yes"}
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 MAX_STEPS = 100
 
-if USE_LLM and not HF_TOKEN:
-    raise RuntimeError("HF_TOKEN is required when USE_LLM=1.")
-
-llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN) if USE_LLM else None
+llm = OpenAI(base_url=os.environ["API_BASE_URL"], api_key=os.environ["API_KEY"])
 
 SYSTEM_PROMPT = """You are a cloud cost optimization agent.
 Reduce monthly cloud cost while preserving uptime (>= 99.9%).
@@ -158,8 +157,6 @@ def normalize_action(action: dict, observation) -> dict:
 
 
 def call_llm(user_prompt: str) -> dict:
-    if llm is None:
-        return {}
     response = llm.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -224,7 +221,7 @@ def run_task(task_id: str) -> float:
 
 
 if __name__ == "__main__":
-    mode = "LLM+heuristic" if USE_LLM else "heuristic-only"
+    mode = "llm-required"
     print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
     for task_id in ["easy", "medium", "hard"]:
