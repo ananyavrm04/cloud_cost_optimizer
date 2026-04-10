@@ -2,7 +2,7 @@
 Data models for the Cloud Cost Optimizer Environment.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from openenv.core.env_server.types import Action, Observation, State
 from pydantic import BaseModel, Field
