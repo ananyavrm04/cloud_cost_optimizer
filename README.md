@@ -197,6 +197,8 @@ score = agent_savings / optimal_savings
 | `API_KEY` | API key for the above endpoint (required) |
 | `MODEL_NAME` | Model identifier (required) |
 | `ENV_URL` | Server URL; defaults to `http://localhost:7860` (optional) |
+| `ENV_HEALTH_RETRIES` | Health probe retries before each task (optional, default `5`) |
+| `ENV_HEALTH_BACKOFF_SECONDS` | Exponential backoff base for health probe (optional, default `1.0`) |
 
 ---
 
@@ -215,6 +217,26 @@ score = agent_savings / optimal_savings
 ```bash
 python -m pytest tests/test_env.py -v
 ```
+
+### Dockerized End-to-End Check
+
+```powershell
+./scripts/run_e2e_docker.ps1
+```
+
+This starts:
+- environment server container
+- mock OpenAI-compatible LLM container
+- inference runner container
+
+---
+
+## CI
+
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
+- `ruff` lint (non-blocking)
+- `mypy` type-check (non-blocking)
+- `pytest tests/test_env.py` (blocking)
 
 ---
 
