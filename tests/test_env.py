@@ -4,8 +4,14 @@ Run: python -m pytest tests/ -v
 """
 
 import json
-import pytest
 from pathlib import Path
+import sys
+
+import pytest
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from models import CloudCostAction, CloudCostObservation, CloudCostState, Resource
 from server.cloud_cost_environment import CloudCostEnvironment
