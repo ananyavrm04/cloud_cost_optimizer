@@ -189,6 +189,12 @@ class TestResize:
         resource = next(r for r in env._resources if r.id == "s1")
         assert resource.status == "resized"
 
+    def test_resize_small_to_small_rejected(self, env):
+        obs = env.step(CloudCostAction(
+            action_type="resize", resource_id="s3", new_size="small"
+        ))
+        assert obs.reward == pytest.approx(-0.05)
+
 
 # ---------------------------------------------------------------------------
 # switch_pricing
@@ -253,6 +259,11 @@ class TestSkip:
         obs = env.step(CloudCostAction(action_type="skip"))
         assert obs.done is True
 
+    def test_step_after_done_remains_done(self, env):
+        env.step(CloudCostAction(action_type="skip"))
+        obs = env.step(CloudCostAction(action_type="terminate", resource_id="s1"))
+        assert obs.done is True
+
 
 # ---------------------------------------------------------------------------
 # invalid action type
@@ -312,3 +323,66 @@ class TestUptimeAndSLA:
         e._resources[0].is_critical = False
         e.step(CloudCostAction(action_type="terminate", resource_id="s1"))
         assert e.state.sla_violated is True
+
+
+class TestAdditionalEdgeCases:
+    def test_terminate_last_running_resource(self):
+        e = CloudCostEnvironment()
+        e.reset(task_id="easy")
+        # Make all resources non-critical so termination is permitted.
+        for r in e._resources:
+            r.is_critical = False
+            r.dependencies = []
+        for rid in ["s1", "s2", "s3"]:
+            e.step(CloudCostAction(action_type="terminate", resource_id=rid))
+        running = [r for r in e._resources if r.status == "running"]
+        assert len(running) == 0
+
+    def test_reset_mid_episode_then_step_works(self):
+        e = CloudCostEnvironment()
+        e.reset(task_id="easy")
+        e.step(CloudCostAction(action_type="terminate", resource_id="s1"))
+        obs = e.reset(task_id="easy")
+        assert obs.done is False
+        next_obs = e.step(CloudCostAction(action_type="skip"))
+        assert next_obs.done is True
+
+
+class TestTaskSchemaValidation:
+    def test_duplicate_resource_ids_rejected(self):
+        e = CloudCostEnvironment()
+        payload = {
+            "resources": [
+                {
+                    "id": "dup", "name": "A", "type": "compute", "size": "small",
+                    "cpu_usage_avg": 1.0, "mem_usage_avg": 1.0, "cost_per_month": 10.0,
+                    "is_critical": False, "dependencies": [], "pricing": "on_demand",
+                    "eligible_for_reserved": False, "status": "running",
+                },
+                {
+                    "id": "dup", "name": "B", "type": "compute", "size": "small",
+                    "cpu_usage_avg": 1.0, "mem_usage_avg": 1.0, "cost_per_month": 10.0,
+                    "is_critical": False, "dependencies": [], "pricing": "on_demand",
+                    "eligible_for_reserved": False, "status": "running",
+                },
+            ],
+            "optimal_savings": 1.0,
+        }
+        with pytest.raises(ValueError):
+            e._validate_task_schema(payload, task_id="dup")
+
+    def test_unknown_dependency_rejected(self):
+        e = CloudCostEnvironment()
+        payload = {
+            "resources": [
+                {
+                    "id": "r1", "name": "A", "type": "compute", "size": "small",
+                    "cpu_usage_avg": 1.0, "mem_usage_avg": 1.0, "cost_per_month": 10.0,
+                    "is_critical": False, "dependencies": ["missing"], "pricing": "on_demand",
+                    "eligible_for_reserved": False, "status": "running",
+                }
+            ],
+            "optimal_savings": 1.0,
+        }
+        with pytest.raises(ValueError):
+            e._validate_task_schema(payload, task_id="bad-deps")
