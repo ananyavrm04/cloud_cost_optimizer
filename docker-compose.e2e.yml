@@ -1,0 +1,50 @@
+services:
+  env-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cco-env-server
+    command: ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
+    ports:
+      - "7860:7860"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mock-llm:
+    image: python:3.11-slim
+    container_name: cco-mock-llm
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install --no-cache-dir fastapi uvicorn &&
+             uvicorn tests.mock_llm_server:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  inference-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cco-inference-runner
+    depends_on:
+      env-server:
+        condition: service_healthy
+      mock-llm:
+        condition: service_healthy
+    environment:
+      API_BASE_URL: http://mock-llm:8000/v1
+      API_KEY: mock-key
+      MODEL_NAME: mock-model
+      ENV_URL: http://env-server:7860
+      ENV_HEALTH_RETRIES: "20"
+      ENV_HEALTH_BACKOFF_SECONDS: "0.5"
+    command: ["python", "inference.py"]

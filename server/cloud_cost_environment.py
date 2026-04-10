@@ -47,6 +47,7 @@ class CloudCostEnvironment(Environment):
         self._max_steps: int = 0
         self._sla_target: float = 99.9
         self._initial_uptime: float = 100.0
+        self._episode_done: bool = False
 
     # ------------------------------------------------------------------
     # reset
@@ -76,6 +77,7 @@ class CloudCostEnvironment(Environment):
             sla_violated=False,
             optimal_savings=optimal_savings,
         )
+        self._episode_done = False
 
         return self._make_observation(done=False, reward=0.0, feedback="Episode started.")
 
@@ -90,6 +92,13 @@ class CloudCostEnvironment(Environment):
         **kwargs,
     ) -> CloudCostObservation:
         """Execute one action and return the resulting observation."""
+        if self._episode_done:
+            return self._make_observation(
+                done=True,
+                reward=0.0,
+                feedback="Episode already finished. Reset to start a new one.",
+            )
+
         self._state.step_count += 1
 
         # Validate action type
@@ -102,6 +111,7 @@ class CloudCostEnvironment(Environment):
 
         # Handle skip — episode ends
         if action.action_type == "skip":
+            self._episode_done = True
             return self._make_observation(
                 done=True,
                 reward=0.0,
@@ -122,6 +132,13 @@ class CloudCostEnvironment(Environment):
                 done=False,
                 reward=-0.1,
                 feedback=f"Resource '{action.resource_id}' is already terminated.",
+            )
+
+        if action.action_type == "terminate" and resource.is_critical:
+            return self._make_observation(
+                done=False,
+                reward=-0.1,
+                feedback=f"Resource '{resource.id}' is critical and cannot be terminated.",
             )
 
         # Dispatch to action handler
@@ -165,6 +182,8 @@ class CloudCostEnvironment(Environment):
         reward = cost_saved_ratio - (sla_penalty * 10) - (0.2 * broken_deps)
 
         done = self._check_done()
+        if done:
+            self._episode_done = True
         feedback = (
             f"Terminated '{resource.id}'. Saved ${cost_saved:.2f}/mo."
             + (f" Broke {broken_deps} dependency chain(s)." if broken_deps else "")
@@ -208,6 +227,8 @@ class CloudCostEnvironment(Environment):
         reward = cost_saved_ratio - (sla_penalty * 10)
 
         done = self._check_done()
+        if done:
+            self._episode_done = True
         feedback = (
             f"Resized '{resource.id}' from {old_size} to {new_size}. "
             f"Saved ${cost_saved:.2f}/mo."
@@ -256,6 +277,8 @@ class CloudCostEnvironment(Environment):
         reward = cost_saved_ratio - (sla_penalty * 10)
 
         done = self._check_done()
+        if done:
+            self._episode_done = True
         feedback = (
             f"Switched '{resource.id}' to {new_pricing} pricing. Saved ${cost_saved:.2f}/mo."
         )
@@ -297,12 +320,38 @@ class CloudCostEnvironment(Environment):
         """Episode ends when max-step budget is exhausted."""
         return self._state.step_count >= self._max_steps
 
+    def _validate_state_consistency(self) -> None:
+        """
+        Runtime consistency checks (Enhancement #90).
+        Raises ValueError if invariants are violated.
+        """
+        if self._state.step_count < 0:
+            raise ValueError("Invariant violated: step_count cannot be negative.")
+
+        for r in self._resources:
+            if r.cost_per_month < 0:
+                raise ValueError(f"Invariant violated: resource '{r.id}' has negative cost.")
+            if r.status == "terminated" and abs(r.cost_per_month) > 1e-9:
+                raise ValueError(
+                    f"Invariant violated: terminated resource '{r.id}' must have zero cost."
+                )
+
+        current_cost = sum(
+            r.cost_per_month for r in self._resources if r.status != "terminated"
+        )
+        expected_cost = self._original_cost - self._state.total_savings
+        if abs(current_cost - expected_cost) > 1e-4:
+            raise ValueError(
+                "Invariant violated: current_cost does not match original_cost - total_savings."
+            )
+
     def _make_observation(
         self,
         done: bool,
         reward: float,
         feedback: str,
     ) -> CloudCostObservation:
+        self._validate_state_consistency()
         current_cost = sum(
             r.cost_per_month for r in self._resources if r.status != "terminated"
         )
@@ -324,8 +373,75 @@ class CloudCostEnvironment(Environment):
         path = tasks_dir / f"{task_id}.json"
         with open(path) as f:
             data = json.load(f)
+        self._validate_task_schema(data, task_id=task_id)
         resources = [Resource(**r) for r in data["resources"]]
         optimal_savings = float(data.get("optimal_savings", 0.0))
         sla_target = float(data.get("sla_target", 99.9))
         initial_uptime = float(data.get("initial_uptime", 100.0))
         return resources, optimal_savings, sla_target, initial_uptime
+
+    def _validate_task_schema(self, data: dict, task_id: str) -> None:
+        """
+        Basic task schema validation (Enhancement #95).
+        Validates required fields, unique IDs, and dependency references.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(f"Task '{task_id}': task payload must be an object.")
+
+        if "resources" not in data or not isinstance(data["resources"], list):
+            raise ValueError(f"Task '{task_id}': missing or invalid 'resources' list.")
+
+        resources = data["resources"]
+        if len(resources) == 0:
+            raise ValueError(f"Task '{task_id}': resources list cannot be empty.")
+
+        required = {
+            "id",
+            "name",
+            "type",
+            "size",
+            "cpu_usage_avg",
+            "mem_usage_avg",
+            "cost_per_month",
+            "is_critical",
+            "dependencies",
+            "pricing",
+            "eligible_for_reserved",
+            "status",
+        }
+        ids: set[str] = set()
+        for idx, item in enumerate(resources):
+            if not isinstance(item, dict):
+                raise ValueError(f"Task '{task_id}': resource[{idx}] must be an object.")
+            missing = required - set(item.keys())
+            if missing:
+                raise ValueError(
+                    f"Task '{task_id}': resource[{idx}] missing fields: {sorted(missing)}."
+                )
+            rid = item["id"]
+            if rid in ids:
+                raise ValueError(f"Task '{task_id}': duplicate resource id '{rid}'.")
+            ids.add(rid)
+            deps = item.get("dependencies", [])
+            if not isinstance(deps, list):
+                raise ValueError(
+                    f"Task '{task_id}': resource '{rid}' has invalid dependencies type."
+                )
+
+        for item in resources:
+            rid = item["id"]
+            for dep in item.get("dependencies", []):
+                if dep not in ids:
+                    raise ValueError(
+                        f"Task '{task_id}': resource '{rid}' references unknown dependency '{dep}'."
+                    )
+
+        optimal_savings = data.get("optimal_savings", 0.0)
+        try:
+            optimal_val = float(optimal_savings)
+        except Exception as exc:
+            raise ValueError(
+                f"Task '{task_id}': 'optimal_savings' must be numeric."
+            ) from exc
+        if optimal_val < 0:
+            raise ValueError(f"Task '{task_id}': 'optimal_savings' cannot be negative.")
