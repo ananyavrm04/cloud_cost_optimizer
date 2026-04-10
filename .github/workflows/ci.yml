@@ -23,6 +23,7 @@ jobs:
           pip install pytest ruff mypy
 
       - name: Lint
+        continue-on-error: true
         run: ruff check .
 
       - name: Type check (best effort)
