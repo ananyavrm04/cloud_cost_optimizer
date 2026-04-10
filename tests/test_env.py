@@ -55,8 +55,6 @@ def write_mock_task(tmp_path, monkeypatch):
     (tasks / "easy.json").write_text(json.dumps(MOCK_EASY))
 
     # Patch _load_task to use tmp tasks dir
-    original_load = CloudCostEnvironment._load_task
-
     def patched_load(self, task_id):
         path = tasks / f"{task_id}.json"
         import json as _json
