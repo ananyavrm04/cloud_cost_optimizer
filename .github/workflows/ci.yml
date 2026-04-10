@@ -31,4 +31,4 @@ jobs:
         run: mypy --ignore-missing-imports inference.py server/cloud_cost_environment.py
 
       - name: Unit tests
-        run: pytest tests/test_env.py -q --basetemp /tmp/cco_pytest
+        run: PYTHONPATH=. pytest tests/test_env.py -q --basetemp /tmp/cco_pytest
