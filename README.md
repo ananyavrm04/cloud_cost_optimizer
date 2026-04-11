@@ -250,6 +250,12 @@ Environment variables always take precedence over config file values.
 python -m pytest tests/test_env.py -v
 ```
 
+Inference helper unit tests:
+
+```bash
+python -m pytest tests/test_inference.py -q
+```
+
 ### Local Pre-Submit Validator
 
 ```bash
@@ -270,6 +276,14 @@ Checks:
 This runs:
 - `python inference.py`
 - `python scripts/pre_submit_check.py`
+
+### Submission Lock Profile (Windows PowerShell)
+
+```powershell
+./scripts/run_submission_profile.ps1
+```
+
+Uses conservative evaluator-safe flags (single vote, no warm-start, no interactive mode).
 
 ### Prompt Version Comparison
 
