@@ -278,6 +278,7 @@ class TestInvalidAction:
         obs = env.step(CloudCostAction(action_type="destroy", resource_id="s1"))
         assert obs.reward == pytest.approx(-0.1)
         assert obs.done is False
+        assert obs.metadata.get("error_code") == "ERR_INVALID_ACTION_TYPE"
 
 
 # ---------------------------------------------------------------------------

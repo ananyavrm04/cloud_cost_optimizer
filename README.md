@@ -42,13 +42,11 @@ The agent reasons step-by-step over cloud resources, but it is constrained by sa
 
 We also focused heavily on reliability under real-world failure modes. If the LLM response is malformed, the parser recovers deterministically. If API calls fail or rate-limit, retries and graceful fallback logic prevent crashes. If the environment is unavailable, health probes with retry/backoff prevent invalid runs before they start.
 
+The current pipeline also includes a sliding multi-turn LLM context window, prompt-response caching, reconnect-safe environment calls with action replay, task trace checkpointing, and optimal-path diff artifacts for post-run analysis.
+
 A major submission requirement was structured stdout parsing. Our inference pipeline emits strict `[START]`, `[STEP]`, and `[END]` blocks with flush-safe logging, so validators can parse every episode deterministically. We also enforce score output strictly inside `(0,1)` to satisfy validator range constraints.
 
 For engineering quality, we added task schema validation, runtime environment-state invariants, CI automation, and dockerized end-to-end testing with a mock OpenAI-compatible LLM server. This makes the repo reproducible for both reviewers and deployment.
-
-If you want the full implementation inventory and future roadmap:
-- See `FUNCTIONALITIES.md` for implemented capabilities.
-- See `ENHANCEMENTS.md` for the complete enhancement backlog and priorities.
 
 ---
 
@@ -283,6 +281,8 @@ Includes:
 - task scores
 - token usage totals
 - model/base URL metadata
+- per-step traces in `artifacts/traces/`
+- estimated-optimal diff reports in `artifacts/optimal_diff/`
 
 ---
 
