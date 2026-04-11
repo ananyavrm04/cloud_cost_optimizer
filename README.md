@@ -88,16 +88,16 @@ The agent can take exactly one of these four actions per step:
 ```
 
 **Size cost multipliers:**
-- `small`: 0.25x base (e.g., $120/mo)
-- `medium`: 0.5x base (e.g., $240/mo)
-- `large`: 1.0x base (e.g., $480/mo)
-- `xlarge`: 2.0x base (e.g., $960/mo)
+- `small`: 1.0x base (e.g., $120/mo)
+- `medium`: 2.0x base (e.g., $240/mo)
+- `large`: 4.0x base (e.g., $480/mo)
+- `xlarge`: 8.0x base (e.g., $960/mo)
 
 ### 3. `switch_pricing`
 **Change pricing plan for a resource.**
 
 - **Use when:** Resource is marked `eligible_for_reserved` and has stable, predictable usage
-- **Available options:** `reserved` (60% of on-demand), `spot` (30% of on-demand)
+- **Available options:** `reserved` (60% of on-demand), `spot` (40% of on-demand)
 
 **Example:**
 ```json
@@ -112,7 +112,7 @@ The agent can take exactly one of these four actions per step:
 **Pricing cost multipliers:**
 - `on_demand`: 1.0x (baseline)
 - `reserved`: 0.6x (40% discount)
-- `spot`: 0.3x (70% discount)
+- `spot`: 0.4x (60% discount)
 
 ### 4. `skip`
 **Signal that optimization is complete.**

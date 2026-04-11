@@ -214,7 +214,7 @@ def _is_non_downsize(current_size: str, requested_size: str) -> bool:
 
 def _pricing_multiplier(pricing: str) -> float:
     if pricing == "spot":
-        return 0.3
+        return 0.4
     if pricing == "reserved":
         return 0.6
     return 1.0
