@@ -32,6 +32,17 @@ PRICING_MULTIPLIERS: dict[str, float] = {
 VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 VALID_SIZES = set(SIZE_MULTIPLIERS.keys())
 VALID_PRICING = {"reserved", "spot"}
+ERROR_CODES = {
+    "invalid_action": "ERR_INVALID_ACTION_TYPE",
+    "not_found": "ERR_RESOURCE_NOT_FOUND",
+    "already_terminated": "ERR_ALREADY_TERMINATED",
+    "critical_terminate": "ERR_CRITICAL_TERMINATION_BLOCKED",
+    "invalid_size": "ERR_INVALID_SIZE",
+    "same_size": "ERR_SAME_SIZE",
+    "invalid_pricing": "ERR_INVALID_PRICING",
+    "pricing_not_eligible": "ERR_PRICING_NOT_ELIGIBLE",
+    "same_pricing": "ERR_SAME_PRICING",
+}
 
 
 class CloudCostEnvironment(Environment):
@@ -103,7 +114,8 @@ class CloudCostEnvironment(Environment):
 
         # Validate action type
         if action.action_type not in VALID_ACTIONS:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["invalid_action"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Invalid action_type '{action.action_type}'. Must be one of {VALID_ACTIONS}.",
@@ -121,21 +133,24 @@ class CloudCostEnvironment(Environment):
         # All other actions require a valid resource
         resource = self._find_resource(action.resource_id)
         if resource is None:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["not_found"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Resource '{action.resource_id}' not found.",
             )
 
         if resource.status == "terminated":
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["already_terminated"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Resource '{action.resource_id}' is already terminated.",
             )
 
         if action.action_type == "terminate" and resource.is_critical:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["critical_terminate"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Resource '{resource.id}' is critical and cannot be terminated.",
@@ -194,13 +209,15 @@ class CloudCostEnvironment(Environment):
 
     def _handle_resize(self, resource: Resource, new_size: str) -> CloudCostObservation:
         if new_size not in VALID_SIZES:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["invalid_size"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Invalid size '{new_size}'. Must be one of {VALID_SIZES}.",
             )
         if new_size == resource.size:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["same_size"],
                 done=False,
                 reward=-0.05,
                 feedback=f"Resource '{resource.id}' is already size '{new_size}'.",
@@ -239,19 +256,22 @@ class CloudCostEnvironment(Environment):
 
     def _handle_switch_pricing(self, resource: Resource, new_pricing: str) -> CloudCostObservation:
         if new_pricing not in VALID_PRICING:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["invalid_pricing"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Invalid pricing '{new_pricing}'. Must be one of {VALID_PRICING}.",
             )
         if not resource.eligible_for_reserved:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["pricing_not_eligible"],
                 done=False,
                 reward=-0.1,
                 feedback=f"Resource '{resource.id}' is not eligible for pricing changes.",
             )
         if new_pricing == resource.pricing:
-            return self._make_observation(
+            return self._error_observation(
+                code=ERROR_CODES["same_pricing"],
                 done=False,
                 reward=-0.05,
                 feedback=f"Resource '{resource.id}' is already on '{new_pricing}' pricing.",
@@ -350,6 +370,7 @@ class CloudCostEnvironment(Environment):
         done: bool,
         reward: float,
         feedback: str,
+        metadata: Optional[dict] = None,
     ) -> CloudCostObservation:
         self._validate_state_consistency()
         current_cost = sum(
@@ -366,6 +387,21 @@ class CloudCostEnvironment(Environment):
             step_feedback=feedback,
             done=done,
             reward=reward,
+            metadata=metadata or {},
+        )
+
+    def _error_observation(
+        self,
+        code: str,
+        done: bool,
+        reward: float,
+        feedback: str,
+    ) -> CloudCostObservation:
+        return self._make_observation(
+            done=done,
+            reward=reward,
+            feedback=feedback,
+            metadata={"error_code": code},
         )
 
     def _load_task(self, task_id: str) -> tuple[list[Resource], float, float, float]:

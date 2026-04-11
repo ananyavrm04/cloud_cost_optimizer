@@ -4,7 +4,9 @@ import re
 import time
 from collections import deque
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -79,6 +81,10 @@ LLM_FAILURE_THRESHOLD = int(_cfg("LLM_FAILURE_THRESHOLD", 3))
 NEGATIVE_STREAK_THRESHOLD = int(_cfg("NEGATIVE_STREAK_THRESHOLD", 3))
 ENV_HEALTH_RETRIES = int(_cfg("ENV_HEALTH_RETRIES", 5))
 ENV_HEALTH_BACKOFF_SECONDS = float(_cfg("ENV_HEALTH_BACKOFF_SECONDS", 1.0))
+PROMPT_CACHE_ENABLED = str(_cfg("PROMPT_CACHE_ENABLED", "1")).lower() in {"1", "true", "yes"}
+EMIT_TOKEN_LOGS = str(_cfg("EMIT_TOKEN_LOGS", "0")).lower() in {"1", "true", "yes"}
+LLM_CONTEXT_WINDOW = int(_cfg("LLM_CONTEXT_WINDOW", 8))
+ENV_CALL_RETRIES = int(_cfg("ENV_CALL_RETRIES", 2))
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -117,6 +123,7 @@ VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 VALID_PRICING = {"on_demand", "reserved", "spot"}
 LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+PROMPT_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _empty_action() -> dict:
@@ -314,6 +321,13 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
     uptime_margin = observation.current_uptime - observation.sla_target
     savings_abs = max(0.0, observation.original_monthly_cost - observation.current_monthly_cost)
     savings_pct = (savings_abs / max(observation.original_monthly_cost, 1e-9)) * 100.0
+    by_type: dict[str, float] = {}
+    for r in running_resources:
+        r_type = str(r.get("type", "unknown"))
+        by_type[r_type] = by_type.get(r_type, 0.0) + float(r.get("cost_per_month", 0.0))
+    cost_breakdown = ", ".join(
+        f"{k}:{v:.2f}" for k, v in sorted(by_type.items(), key=lambda kv: kv[1], reverse=True)
+    ) or "none"
 
     # Enhancement #46: compress prompt when resource count is large.
     if len(running_resources) > 40:
@@ -336,6 +350,7 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
         f"Savings so far: {savings_abs:.2f} ({savings_pct:.2f}%)\n"
         f"Uptime: {observation.current_uptime:.3f} target={observation.sla_target}\n"
         f"Uptime margin: {uptime_margin:.3f}\n"
+        f"Cost breakdown by type: {cost_breakdown}\n"
         f"Max dependency depth: {max_dep_depth}\n"
         f"Steps remaining: {steps_remaining}\n"
         f"Feedback: {observation.step_feedback}\n"
@@ -415,17 +430,25 @@ def heuristic_action(observation, blocked_actions: set[tuple]) -> dict:
 
     # Candidate: pricing switch
     for r in running:
-        candidate = ("switch_pricing", r["id"], "", "reserved")
+        target_pricing = "reserved"
+        if (
+            not r.get("is_critical", False)
+            and dependency_depth.get(r["id"], 0) == 0
+            and r.get("cpu_usage_avg", 100.0) < 25.0
+            and r.get("mem_usage_avg", 100.0) < 35.0
+        ):
+            target_pricing = "spot"
+        candidate = ("switch_pricing", r["id"], "", target_pricing)
         if (
             r.get("eligible_for_reserved", False)
-            and r.get("pricing") != "reserved"
+            and r.get("pricing") != target_pricing
             and candidate not in blocked_actions
         ):
             action = {
                 "action_type": "switch_pricing",
                 "resource_id": r["id"],
                 "new_size": "",
-                "new_pricing": "reserved",
+                "new_pricing": target_pricing,
             }
             risk = _action_risk_score(action, r, dependency_depth.get(r["id"], 0), uptime_margin)
             gain = _expected_savings(action, r)
@@ -510,7 +533,17 @@ def _extract_json(raw: str) -> dict:
         return {}
 
 
-def _llm_request(messages: list[dict]) -> tuple[dict, dict]:
+def _cache_key(messages: list[dict]) -> str:
+    payload = json.dumps(messages, separators=(",", ":"), ensure_ascii=True)
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _llm_request(messages: list[dict]) -> tuple[dict, dict, str]:
+    if PROMPT_CACHE_ENABLED:
+        key = _cache_key(messages)
+        cached = PROMPT_RESPONSE_CACHE.get(key)
+        if cached is not None:
+            return dict(cached.get("parsed", {})), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, str(cached.get("raw", ""))
     response = llm.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
@@ -529,20 +562,27 @@ def _llm_request(messages: list[dict]) -> tuple[dict, dict]:
     LLM_METRICS["completion_tokens"] += usage_dict["completion_tokens"]
     LLM_METRICS["total_tokens"] += usage_dict["total_tokens"]
     raw = (response.choices[0].message.content or "").strip()
-    return _extract_json(raw), usage_dict
+    parsed = _extract_json(raw)
+    if PROMPT_CACHE_ENABLED:
+        PROMPT_RESPONSE_CACHE[key] = {"parsed": dict(parsed), "raw": raw}
+    return parsed, usage_dict, raw
 
 
-def call_llm(user_prompt: str) -> tuple[dict, bool]:
+def call_llm(user_prompt: str, message_history: list[dict]) -> tuple[dict, bool, dict, str]:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *message_history,
         {"role": "user", "content": user_prompt},
     ]
+    usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     for attempt in range(max(1, LLM_MAX_RETRIES)):
         try:
-            parsed, _ = _llm_request(messages)
+            parsed, usage, raw = _llm_request(messages)
+            for k in usage_total:
+                usage_total[k] += int(usage.get(k, 0))
             if parsed:
-                return parsed, True
+                return parsed, True, usage_total, raw
 
             # Deterministic parse recovery prompt
             repair_messages = messages + [
@@ -554,9 +594,11 @@ def call_llm(user_prompt: str) -> tuple[dict, bool]:
                     ),
                 }
             ]
-            parsed, _ = _llm_request(repair_messages)
+            parsed, usage, raw = _llm_request(repair_messages)
+            for k in usage_total:
+                usage_total[k] += int(usage.get(k, 0))
             if parsed:
-                return parsed, True
+                return parsed, True, usage_total, raw
         except Exception as exc:
             # Enhancement #73: bounded exponential backoff on rate limit.
             status_code = getattr(exc, "status_code", None)
@@ -568,7 +610,7 @@ def call_llm(user_prompt: str) -> tuple[dict, bool]:
             continue
 
     # Graceful degradation trigger
-    return {}, False
+    return {}, False, usage_total, ""
 
 
 def compute_score(state) -> float:
@@ -601,11 +643,98 @@ def wait_for_env_health() -> None:
     raise RuntimeError(f"Environment health check failed at {health_url}: {last_error}")
 
 
+def _connect_env():
+    ctx = CloudCostEnv(base_url=ENV_URL).sync()
+    env = ctx.__enter__()
+    return ctx, env
+
+
+def _close_env(ctx) -> None:
+    if ctx is None:
+        return
+    try:
+        ctx.__exit__(None, None, None)
+    except Exception:
+        pass
+
+
+def _recover_env(task_id: str, replay_actions: list[CloudCostAction]):
+    ctx, env = _connect_env()
+    env.reset(task_id=task_id)
+    for replay_action in replay_actions:
+        env.step(replay_action)
+    return ctx, env
+
+
+def _run_with_reconnect(fn_name: str, fn, task_id: str, env_ctx, env_obj, replay_actions):
+    ctx = env_ctx
+    env = env_obj
+    for attempt in range(max(1, ENV_CALL_RETRIES)):
+        try:
+            return fn(env), ctx, env
+        except Exception:
+            _close_env(ctx)
+            if attempt == max(1, ENV_CALL_RETRIES) - 1:
+                raise
+            ctx, env = _recover_env(task_id, replay_actions)
+    raise RuntimeError(f"Unexpected reconnect loop exit for {fn_name}")
+
+
+def _estimated_optimal_actions(observation) -> list[dict]:
+    running = [r for r in observation.resources if r.get("status") == "running"]
+    dep_depth = _dependency_depths(running)
+    actions: list[tuple[float, dict]] = []
+    for r in running:
+        if (
+            not r.get("is_critical", True)
+            and dep_depth.get(r["id"], 0) == 0
+            and r.get("cpu_usage_avg", 100.0) < 8.0
+            and r.get("mem_usage_avg", 100.0) < 15.0
+        ):
+            action = {"action_type": "terminate", "resource_id": r["id"], "new_size": "", "new_pricing": ""}
+            actions.append((_expected_savings(action, r), action))
+        if (
+            not r.get("is_critical", False)
+            and dep_depth.get(r["id"], 0) == 0
+            and r.get("size") in {"medium", "large", "xlarge"}
+            and r.get("cpu_usage_avg", 100.0) < 45.0
+        ):
+            new_size = _next_downsize(r.get("size", ""))
+            action = {"action_type": "resize", "resource_id": r["id"], "new_size": new_size, "new_pricing": ""}
+            actions.append((_expected_savings(action, r), action))
+        if r.get("eligible_for_reserved", False):
+            target = "reserved"
+            if (
+                not r.get("is_critical", False)
+                and dep_depth.get(r["id"], 0) == 0
+                and r.get("cpu_usage_avg", 100.0) < 25.0
+                and r.get("mem_usage_avg", 100.0) < 35.0
+            ):
+                target = "spot"
+            action = {"action_type": "switch_pricing", "resource_id": r["id"], "new_size": "", "new_pricing": target}
+            actions.append((_expected_savings(action, r), action))
+    actions.sort(key=lambda x: x[0], reverse=True)
+    return [x[1] for x in actions if x[0] > 0]
+
+
+def _write_json_artifact(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def run_task(task_id: str) -> tuple[float, int]:
     print(f"[START] task={task_id}", flush=True)
     wait_for_env_health()
-    with CloudCostEnv(base_url=ENV_URL).sync() as env:
-        reset_result = env.reset(task_id=task_id)
+    ctx, env = _connect_env()
+    try:
+        reset_result, ctx, env = _run_with_reconnect(
+            "reset",
+            lambda e: e.reset(task_id=task_id),
+            task_id=task_id,
+            env_ctx=ctx,
+            env_obj=env,
+            replay_actions=[],
+        )
         observation = (
             reset_result.observation
             if hasattr(reset_result, "observation")
@@ -622,10 +751,22 @@ def run_task(task_id: str) -> tuple[float, int]:
         last_failed_action_key: tuple | None = None
         last_observation = None
         last_observation_diff = "initial step"
+        llm_message_history: deque[dict] = deque(maxlen=max(0, LLM_CONTEXT_WINDOW * 2))
+        executed_actions: list[CloudCostAction] = []
+        trace_rows: list[dict] = []
+        initial_observation = observation
+        estimated_optimal_actions = _estimated_optimal_actions(initial_observation)
 
         for step_idx in range(1, MAX_STEPS + 1):
             steps_remaining = MAX_STEPS - step_idx + 1
-            state_snapshot = env.state()
+            state_snapshot, ctx, env = _run_with_reconnect(
+                "state",
+                lambda e: e.state(),
+                task_id=task_id,
+                env_ctx=ctx,
+                env_obj=env,
+                replay_actions=executed_actions,
+            )
             projected_if_skip = compute_score(state_snapshot)
             # Early completion on full optimization (Enhancement #21).
             if (
@@ -645,21 +786,32 @@ def run_task(task_id: str) -> tuple[float, int]:
             elif llm_unavailable:
                 action_data = heuristic_action(observation, blocked_actions)
             else:
-                raw_action, llm_ok = call_llm(
-                    build_user_prompt(
-                        observation=observation,
-                        step_history=list(step_history)
-                        + [
-                            (
-                                "progress total_savings="
-                                f"{state_snapshot.total_savings:.2f} optimal_savings={state_snapshot.optimal_savings:.2f} "
-                                f"savings_progress={projected_if_skip:.4f}"
-                            )
-                        ],
-                        steps_remaining=steps_remaining,
-                        observation_diff=last_observation_diff,
-                    )
+                prompt_text = build_user_prompt(
+                    observation=observation,
+                    step_history=list(step_history)
+                    + [
+                        (
+                            "progress total_savings="
+                            f"{state_snapshot.total_savings:.2f} optimal_savings={state_snapshot.optimal_savings:.2f} "
+                            f"savings_progress={projected_if_skip:.4f}"
+                        )
+                    ],
+                    steps_remaining=steps_remaining,
+                    observation_diff=last_observation_diff,
                 )
+                raw_action, llm_ok, usage, raw_content = call_llm(
+                    prompt_text,
+                    list(llm_message_history),
+                )
+                if raw_content:
+                    llm_message_history.append({"role": "user", "content": prompt_text})
+                    llm_message_history.append({"role": "assistant", "content": raw_content})
+                if EMIT_TOKEN_LOGS:
+                    print(
+                        f"[TOKENS] task={task_id} step={step_idx} prompt={usage['prompt_tokens']} "
+                        f"completion={usage['completion_tokens']} total={usage['total_tokens']}",
+                        flush=True,
+                    )
                 if llm_ok:
                     consecutive_llm_failures = 0
                     action_data = normalize_action(raw_action, observation, blocked_actions)
@@ -708,11 +860,19 @@ def run_task(task_id: str) -> tuple[float, int]:
                     if predicted <= 0:
                         action = CloudCostAction(**_empty_action())
 
-            result = env.step(action)
+            result, ctx, env = _run_with_reconnect(
+                "step",
+                lambda e: e.step(action),
+                task_id=task_id,
+                env_ctx=ctx,
+                env_obj=env,
+                replay_actions=executed_actions,
+            )
             last_observation = observation
             observation = result.observation
             steps_executed = step_idx
             last_observation_diff = _summarize_observation_diff(last_observation, observation)
+            executed_actions.append(action)
 
             blocked_actions.add((action.action_type, action.resource_id, action.new_size, action.new_pricing))
             step_history.append(
@@ -727,6 +887,22 @@ def run_task(task_id: str) -> tuple[float, int]:
             else:
                 consecutive_negative = 0
                 last_failed_action_key = None
+            trace_rows.append(
+                {
+                    "step": step_idx,
+                    "action": {
+                        "action_type": action.action_type,
+                        "resource_id": action.resource_id,
+                        "new_size": action.new_size,
+                        "new_pricing": action.new_pricing,
+                    },
+                    "reward": float(result.reward),
+                    "done": bool(result.done),
+                    "feedback": observation.step_feedback,
+                    "current_monthly_cost": float(observation.current_monthly_cost),
+                    "current_uptime": float(observation.current_uptime),
+                }
+            )
 
             print(
                 f"[STEP] task={task_id} step={step_idx} action={action.action_type} "
@@ -738,7 +914,57 @@ def run_task(task_id: str) -> tuple[float, int]:
 
         score = compute_score(env.state())
         print(f"[END] task={task_id} score={score:.4f} steps={steps_executed}", flush=True)
+        artifacts_dir = Path("artifacts")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        _write_json_artifact(
+            artifacts_dir / "traces" / f"{task_id}_{timestamp}.json",
+            {
+                "task_id": task_id,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "steps_executed": steps_executed,
+                "score": score,
+                "trace": trace_rows,
+            },
+        )
+        executed_keys = {
+            (
+                a.action_type,
+                a.resource_id,
+                a.new_size,
+                a.new_pricing,
+            )
+            for a in executed_actions
+            if a.action_type != "skip"
+        }
+        optimal_keys = {
+            (
+                a["action_type"],
+                a["resource_id"],
+                a["new_size"],
+                a["new_pricing"],
+            )
+            for a in estimated_optimal_actions
+        }
+        missed_actions = [
+            {"action_type": k[0], "resource_id": k[1], "new_size": k[2], "new_pricing": k[3]}
+            for k in (optimal_keys - executed_keys)
+        ]
+        _write_json_artifact(
+            artifacts_dir / "optimal_diff" / f"{task_id}_{timestamp}.json",
+            {
+                "task_id": task_id,
+                "estimated_optimal_action_count": len(estimated_optimal_actions),
+                "executed_non_skip_action_count": len(executed_keys),
+                "missed_action_count": len(missed_actions),
+                "missed_actions": missed_actions[:100],
+                "total_savings": float(env.state().total_savings),
+                "optimal_savings": float(env.state().optimal_savings),
+                "savings_gap": float(max(0.0, env.state().optimal_savings - env.state().total_savings)),
+            },
+        )
         return score, steps_executed
+    finally:
+        _close_env(ctx)
 
 
 if __name__ == "__main__":
