@@ -7,7 +7,8 @@ Usage:
         result = env.step(CloudCostAction(action_type="skip"))
 """
 
-from typing import Dict
+import time
+from typing import Callable, Dict, List, Optional
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
@@ -58,3 +59,82 @@ class CloudCostEnv(EnvClient[CloudCostAction, CloudCostObservation, CloudCostSta
             sla_violated=payload.get("sla_violated", False),
             optimal_savings=payload.get("optimal_savings", 0.0),
         )
+
+
+class ReconnectingCloudCostEnv:
+    """
+    Reconnecting wrapper at client layer (Enhancement #58).
+
+    It retries reset/step/state calls by reconnecting and replaying executed actions.
+    """
+
+    def __init__(self, base_url: str, retries: int = 2, backoff_seconds: float = 0.2):
+        self.base_url = base_url
+        self.retries = max(1, retries)
+        self.backoff_seconds = max(0.0, backoff_seconds)
+        self._ctx = None
+        self._env = None
+        self._task_id: Optional[str] = None
+        self._replay_actions: List[CloudCostAction] = []
+
+    def __enter__(self):
+        self._connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def close(self) -> None:
+        if self._ctx is None:
+            return
+        try:
+            self._ctx.__exit__(None, None, None)
+        finally:
+            self._ctx = None
+            self._env = None
+
+    def _connect(self) -> None:
+        self.close()
+        self._ctx = CloudCostEnv(base_url=self.base_url).sync()
+        self._env = self._ctx.__enter__()
+
+    def _recover_and_replay(self) -> None:
+        self._connect()
+        if not self._task_id:
+            return
+        self._env.reset(task_id=self._task_id)
+        for action in self._replay_actions:
+            self._env.step(action)
+
+    def _with_retry(self, fn: Callable):
+        last_error = None
+        for attempt in range(self.retries):
+            try:
+                return fn()
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.retries - 1:
+                    break
+                time.sleep(self.backoff_seconds * (2 ** attempt))
+                self._recover_and_replay()
+        raise last_error
+
+    def reset(self, task_id: str):
+        def call():
+            self._task_id = task_id
+            self._replay_actions = []
+            return self._env.reset(task_id=task_id)
+
+        return self._with_retry(call)
+
+    def step(self, action: CloudCostAction):
+        def call():
+            result = self._env.step(action)
+            self._replay_actions.append(action)
+            return result
+
+        return self._with_retry(call)
+
+    def state(self):
+        return self._with_retry(lambda: self._env.state())

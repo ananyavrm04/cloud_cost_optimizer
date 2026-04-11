@@ -220,6 +220,11 @@ score = agent_savings / optimal_savings
 | `FALLBACK_MODEL_NAME` | Optional backup model for automatic fallback if primary model fails/parses badly |
 | `MODEL_FALLBACKS` | Optional comma-separated extra fallback models after `MODEL_NAME` and `FALLBACK_MODEL_NAME` |
 | `NOOP_STREAK_THRESHOLD` | Auto-skip after repeated unchanged observations (optional, default `3`) |
+| `USE_CLIENT_RECONNECT_WRAPPER` | Enable client-level reconnect/replay wrapper (optional, default enabled) |
+| `INTERACTIVE_MODE` | Human-in-the-loop confirmations for each proposed action (optional, default off) |
+| `ENSEMBLE_VOTES` | Number of LLM vote samples per step (optional, default `1`) |
+| `ENSEMBLE_TEMPERATURE` | Sampling temperature when ensemble voting is enabled |
+| `WARM_START_STEPS` | Bounded warm-start seeded actions at beginning of each task (optional, default `0`) |
 | `EMIT_PROJECTED_LOGS` | Emit `[PROJECTED]` lines with projected score-if-skip each step (optional, default off) |
 | `PROMPT_COST_PER_1K_TOKENS` | Prompt token price for cost accounting (optional, default `0`) |
 | `COMPLETION_COST_PER_1K_TOKENS` | Completion token price for cost accounting (optional, default `0`) |
@@ -278,6 +283,12 @@ Optional versions:
 python scripts/compare_prompts.py v1 v2
 ```
 
+### Interactive Demo Mode
+
+```bash
+python inference.py --interactive
+```
+
 ### Dockerized End-to-End Check
 
 ```powershell
@@ -324,6 +335,7 @@ Includes:
 - `[TOKENS]`: optional per-step token usage (`EMIT_TOKEN_LOGS=1`)
 - `[PROJECTED]`: optional projected score-if-skip (`EMIT_PROJECTED_LOGS=1`)
 - `[STATS]`: per-task action success statistics
+- `[COVERAGE]`: explored action-space ratio per task
 
 ---
 

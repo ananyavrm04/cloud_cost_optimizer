@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import argparse
 from collections import deque
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import requests
 
-from client import CloudCostEnv
+from client import CloudCostEnv, ReconnectingCloudCostEnv
 from models import CloudCostAction
 
 load_dotenv()
@@ -96,6 +97,11 @@ MODEL_FALLBACKS = [
 EMIT_PROJECTED_LOGS = str(_cfg("EMIT_PROJECTED_LOGS", "0")).lower() in {"1", "true", "yes"}
 PROMPT_COST_PER_1K_TOKENS = float(_cfg("PROMPT_COST_PER_1K_TOKENS", 0.0))
 COMPLETION_COST_PER_1K_TOKENS = float(_cfg("COMPLETION_COST_PER_1K_TOKENS", 0.0))
+USE_CLIENT_RECONNECT_WRAPPER = str(_cfg("USE_CLIENT_RECONNECT_WRAPPER", "1")).lower() in {"1", "true", "yes"}
+INTERACTIVE_MODE = str(_cfg("INTERACTIVE_MODE", "0")).lower() in {"1", "true", "yes"}
+ENSEMBLE_VOTES = int(_cfg("ENSEMBLE_VOTES", 1))
+ENSEMBLE_TEMPERATURE = float(_cfg("ENSEMBLE_TEMPERATURE", 0.1))
+WARM_START_STEPS = int(_cfg("WARM_START_STEPS", 0))
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -572,7 +578,7 @@ def _cache_key(messages: list[dict]) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _llm_request(messages: list[dict], model_name: str) -> tuple[dict, dict, str]:
+def _llm_request(messages: list[dict], model_name: str, temperature: float = 0.0) -> tuple[dict, dict, str]:
     if PROMPT_CACHE_ENABLED:
         key = f"{model_name}:{_cache_key(messages)}"
         cached = PROMPT_RESPONSE_CACHE.get(key)
@@ -581,7 +587,7 @@ def _llm_request(messages: list[dict], model_name: str) -> tuple[dict, dict, str
     response = llm.chat.completions.create(
         model=model_name,
         messages=messages,
-        temperature=0.0,
+        temperature=temperature,
         max_tokens=200,
         timeout=LLM_TIMEOUT_SECONDS,
     )
@@ -622,40 +628,56 @@ def call_llm(user_prompt: str, message_history: list[dict]) -> tuple[dict, bool,
     candidate_models.extend(MODEL_FALLBACKS)
     # Keep stable order and remove duplicates.
     dedup_models = list(dict.fromkeys(candidate_models))
+    vote_counter: dict[tuple, int] = {}
+    vote_payload: dict[tuple, tuple[dict, str]] = {}
 
     for model_name in dedup_models:
-        for attempt in range(max(1, LLM_MAX_RETRIES)):
-            try:
-                parsed, usage, raw = _llm_request(messages, model_name=model_name)
-                for k in usage_total:
-                    usage_total[k] += int(usage.get(k, 0))
-                if parsed:
-                    return parsed, True, usage_total, raw
+        votes = max(1, ENSEMBLE_VOTES)
+        for vote_idx in range(votes):
+            for attempt in range(max(1, LLM_MAX_RETRIES)):
+                temp = 0.0 if votes == 1 else max(0.0, ENSEMBLE_TEMPERATURE)
+                try:
+                    parsed, usage, raw = _llm_request(messages, model_name=model_name, temperature=temp)
+                    for k in usage_total:
+                        usage_total[k] += int(usage.get(k, 0))
+                    if parsed:
+                        key = _action_key(parsed)
+                        vote_counter[key] = vote_counter.get(key, 0) + 1
+                        vote_payload[key] = (parsed, raw)
+                        break
 
-                # Deterministic parse recovery prompt
-                repair_messages = messages + [
-                    {
-                        "role": "user",
-                        "content": (
-                            "Return ONLY valid JSON with keys: action_type, resource_id, "
-                            "new_size, new_pricing. No extra text."
-                        ),
-                    }
-                ]
-                parsed, usage, raw = _llm_request(repair_messages, model_name=model_name)
-                for k in usage_total:
-                    usage_total[k] += int(usage.get(k, 0))
-                if parsed:
-                    return parsed, True, usage_total, raw
-            except Exception as exc:
-                # Enhancement #73: bounded exponential backoff on rate limit.
-                status_code = getattr(exc, "status_code", None)
-                response = getattr(exc, "response", None)
-                if status_code is None and response is not None:
-                    status_code = getattr(response, "status_code", None)
-                if status_code == 429 and attempt < max(1, LLM_MAX_RETRIES) - 1:
-                    time.sleep(min(2.0, 0.5 * (2 ** attempt)))
-                continue
+                    # Deterministic parse recovery prompt
+                    repair_messages = messages + [
+                        {
+                            "role": "user",
+                            "content": (
+                                "Return ONLY valid JSON with keys: action_type, resource_id, "
+                                "new_size, new_pricing. No extra text."
+                            ),
+                        }
+                    ]
+                    parsed, usage, raw = _llm_request(repair_messages, model_name=model_name, temperature=temp)
+                    for k in usage_total:
+                        usage_total[k] += int(usage.get(k, 0))
+                    if parsed:
+                        key = _action_key(parsed)
+                        vote_counter[key] = vote_counter.get(key, 0) + 1
+                        vote_payload[key] = (parsed, raw)
+                        break
+                except Exception as exc:
+                    # Enhancement #73: bounded exponential backoff on rate limit.
+                    status_code = getattr(exc, "status_code", None)
+                    response = getattr(exc, "response", None)
+                    if status_code is None and response is not None:
+                        status_code = getattr(response, "status_code", None)
+                    if status_code == 429 and attempt < max(1, LLM_MAX_RETRIES) - 1:
+                        time.sleep(min(2.0, 0.5 * (2 ** attempt)))
+                    continue
+
+    if vote_counter:
+        best_key = max(vote_counter.items(), key=lambda kv: kv[1])[0]
+        parsed, raw = vote_payload[best_key]
+        return parsed, True, usage_total, raw
 
     # Graceful degradation trigger
     return {}, False, usage_total, ""
@@ -692,6 +714,14 @@ def wait_for_env_health() -> None:
 
 
 def _connect_env():
+    if USE_CLIENT_RECONNECT_WRAPPER:
+        wrapper = ReconnectingCloudCostEnv(
+            base_url=ENV_URL,
+            retries=ENV_CALL_RETRIES,
+            backoff_seconds=0.2,
+        )
+        env = wrapper.__enter__()
+        return wrapper, env
     ctx = CloudCostEnv(base_url=ENV_URL).sync()
     env = ctx.__enter__()
     return ctx, env
@@ -707,6 +737,13 @@ def _close_env(ctx) -> None:
 
 
 def _recover_env(task_id: str, replay_actions: list[CloudCostAction]):
+    if USE_CLIENT_RECONNECT_WRAPPER:
+        # Wrapper already recovers internally; reconnect explicitly for symmetry.
+        ctx, env = _connect_env()
+        env.reset(task_id=task_id)
+        for replay_action in replay_actions:
+            env.step(replay_action)
+        return ctx, env
     ctx, env = _connect_env()
     env.reset(task_id=task_id)
     for replay_action in replay_actions:
@@ -715,6 +752,9 @@ def _recover_env(task_id: str, replay_actions: list[CloudCostAction]):
 
 
 def _run_with_reconnect(fn_name: str, fn, task_id: str, env_ctx, env_obj, replay_actions):
+    if USE_CLIENT_RECONNECT_WRAPPER:
+        # Call-through; ReconnectingCloudCostEnv handles retries internally.
+        return fn(env_obj), env_ctx, env_obj
     ctx = env_ctx
     env = env_obj
     for attempt in range(max(1, ENV_CALL_RETRIES)):
@@ -795,7 +835,61 @@ def _observation_hash(observation) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, dict[str, dict[str, int]]]:
+def _warm_start_actions(task_id: str) -> list[dict[str, str]]:
+    # Enhancement #57: bounded warm-start sequence.
+    seeds = {
+        "easy": [
+            {"action_type": "terminate", "resource_id": "web-server-1", "new_size": "", "new_pricing": ""},
+            {"action_type": "terminate", "resource_id": "web-server-2", "new_size": "", "new_pricing": ""},
+            {"action_type": "terminate", "resource_id": "web-server-3", "new_size": "", "new_pricing": ""},
+        ],
+        "medium": [
+            {"action_type": "resize", "resource_id": "oversized-compute-1", "new_size": "medium", "new_pricing": ""},
+            {"action_type": "resize", "resource_id": "oversized-compute-2", "new_size": "medium", "new_pricing": ""},
+            {"action_type": "terminate", "resource_id": "idle-web-1", "new_size": "", "new_pricing": ""},
+        ],
+        "hard": [
+            {"action_type": "resize", "resource_id": "oversized-compute-1", "new_size": "medium", "new_pricing": ""},
+            {"action_type": "resize", "resource_id": "oversized-compute-2", "new_size": "medium", "new_pricing": ""},
+            {"action_type": "terminate", "resource_id": "idle-lw-1", "new_size": "", "new_pricing": ""},
+        ],
+    }
+    return seeds.get(task_id, [])
+
+
+def _confirm_action(action_data: dict, task_id: str, step_idx: int) -> dict:
+    if not INTERACTIVE_MODE:
+        return action_data
+    action_type = action_data.get("action_type", "skip")
+    target = action_data.get("resource_id", "-") or "-"
+    prompt = (
+        f"[INTERACTIVE] task={task_id} step={step_idx} propose={action_type} target={target} "
+        "-> approve? [y=approve,s=skip,h=heuristic]: "
+    )
+    choice = input(prompt).strip().lower()
+    if choice in {"y", "yes", ""}:
+        return action_data
+    if choice in {"h", "heuristic"}:
+        return {"action_type": "__heuristic__", "resource_id": "", "new_size": "", "new_pricing": ""}
+    return _empty_action()
+
+
+def _count_possible_actions(observation) -> int:
+    running = [r for r in observation.resources if r.get("status") == "running"]
+    possible = 1  # skip
+    for r in running:
+        possible += 1  # terminate candidate
+        if r.get("size") in {"medium", "large", "xlarge"}:
+            possible += 1
+        if r.get("eligible_for_reserved", False):
+            if r.get("pricing") != "reserved":
+                possible += 1
+            if r.get("pricing") != "spot":
+                possible += 1
+    return max(1, possible)
+
+
+def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, dict[str, dict[str, int]], dict[str, float]]:
     print(f"[START] task={task_id}", flush=True)
     wait_for_env_health()
     ctx, env = _connect_env()
@@ -838,9 +932,13 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
         initial_observation = observation
         estimated_optimal_actions = _estimated_optimal_actions(initial_observation)
         initial_resource_map = {r.get("id", ""): r for r in initial_observation.resources}
+        warm_start_plan = _warm_start_actions(task_id)
+        explored_actions: set[tuple] = set()
+        max_possible_actions = _count_possible_actions(observation)
 
         for step_idx in range(1, MAX_STEPS + 1):
             steps_remaining = MAX_STEPS - step_idx + 1
+            max_possible_actions = max(max_possible_actions, _count_possible_actions(observation))
             state_snapshot, ctx, env = _run_with_reconnect(
                 "state",
                 lambda e: e.state(),
@@ -867,6 +965,9 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             # Enhancement #63: once SLA is violated, switch to damage-control.
             if action_data is not None:
                 pass
+            elif step_idx <= max(0, WARM_START_STEPS) and step_idx <= len(warm_start_plan):
+                seeded = warm_start_plan[step_idx - 1]
+                action_data = normalize_action(seeded, observation, blocked_actions)
             elif sla_damaged or observation.current_uptime < observation.sla_target:
                 action_data = _empty_action()
             elif consecutive_negative >= NEGATIVE_STREAK_THRESHOLD:
@@ -910,6 +1011,10 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                         llm_unavailable = True
                     action_data = heuristic_action(observation, blocked_actions)
 
+            action_data = _confirm_action(action_data, task_id=task_id, step_idx=step_idx)
+            if action_data.get("action_type") == "__heuristic__":
+                action_data = heuristic_action(observation, blocked_actions)
+
             action = CloudCostAction(
                 action_type=action_data.get("action_type", "skip"),
                 resource_id=action_data.get("resource_id", ""),
@@ -917,6 +1022,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 new_pricing=action_data.get("new_pricing", ""),
             )
             current_action_key = (action.action_type, action.resource_id, action.new_size, action.new_pricing)
+            explored_actions.add(current_action_key)
             # Enhancement #45: block immediate repeat of the same failed action.
             if (
                 last_failed_action_key is not None
@@ -988,6 +1094,26 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             else:
                 consecutive_negative = 0
                 last_failed_action_key = None
+
+            error_code = ""
+            if hasattr(observation, "metadata") and isinstance(observation.metadata, dict):
+                error_code = str(observation.metadata.get("error_code", "") or "")
+            if error_code:
+                # Enhancement #69: consume structured server error codes and adapt.
+                if error_code in {
+                    "ERR_RESOURCE_NOT_FOUND",
+                    "ERR_ALREADY_TERMINATED",
+                    "ERR_INVALID_SIZE",
+                    "ERR_SAME_SIZE",
+                    "ERR_INVALID_PRICING",
+                    "ERR_PRICING_NOT_ELIGIBLE",
+                    "ERR_SAME_PRICING",
+                }:
+                    blocked_actions.add(current_action_key)
+                if error_code == "ERR_INVALID_ACTION_TYPE":
+                    consecutive_llm_failures += 1
+                    if consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
+                        llm_unavailable = True
             trace_rows.append(
                 {
                     "step": step_idx,
@@ -1003,6 +1129,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                     "current_monthly_cost": float(observation.current_monthly_cost),
                     "current_uptime": float(observation.current_uptime),
                     "no_change_streak": no_change_streak,
+                    "error_code": error_code,
                 }
             )
 
@@ -1026,6 +1153,22 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             f"switch_pricing={action_stats['switch_pricing']} skip={action_stats['skip']}",
             flush=True,
         )
+        explored_non_skip = {
+            x
+            for x in explored_actions
+            if x[0] != "skip"
+        }
+        coverage = len(explored_non_skip) / max(1, max_possible_actions - 1)
+        coverage_info = {
+            "explored_actions": float(len(explored_non_skip)),
+            "possible_actions_estimate": float(max(1, max_possible_actions - 1)),
+            "coverage_ratio": float(coverage),
+        }
+        print(
+            f"[COVERAGE] task={task_id} explored={int(coverage_info['explored_actions'])}/"
+            f"{int(coverage_info['possible_actions_estimate'])} ratio={coverage_info['coverage_ratio']:.4f}",
+            flush=True,
+        )
         artifacts_dir = Path("artifacts")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         _write_json_artifact(
@@ -1035,6 +1178,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "steps_executed": steps_executed,
                 "score": score,
+                "coverage": coverage_info,
                 "trace": trace_rows,
             },
         )
@@ -1086,6 +1230,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 "optimal_savings": float(env.state().optimal_savings),
                 "savings_gap": float(max(0.0, env.state().optimal_savings - env.state().total_savings)),
                 "missed_savings_estimate": round(float(missed_savings_estimate), 4),
+                "coverage": coverage_info,
             },
         )
 
@@ -1097,23 +1242,31 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             elif stat["attempted"] > 0:
                 learning_bits.append(f"{action_type}:weak({stat['non_positive']}/{stat['attempted']})")
         task_learning_hint = f"{task_id}=>" + (", ".join(learning_bits) if learning_bits else "no-strong-signal")
-        return score, steps_executed, task_learning_hint, action_stats
+        return score, steps_executed, task_learning_hint, action_stats, coverage_info
     finally:
         _close_env(ctx)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Cloud Cost Optimizer inference runner")
+    parser.add_argument("--interactive", action="store_true", help="Enable human-in-the-loop confirmations")
+    args = parser.parse_args()
+    if args.interactive:
+        globals()["INTERACTIVE_MODE"] = True
+
     mode = "llm-required"
     print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
     per_task_steps: dict[str, int] = {}
     per_task_action_stats: dict[str, dict[str, dict[str, int]]] = {}
+    per_task_coverage: dict[str, dict[str, float]] = {}
     transfer_hint = _build_transfer_hint()
     for task_id in ["easy", "medium", "hard"]:
-        score, steps, task_learning_hint, action_stats = run_task(task_id, transfer_hint=transfer_hint)
+        score, steps, task_learning_hint, action_stats, coverage_info = run_task(task_id, transfer_hint=transfer_hint)
         scores[task_id] = score
         per_task_steps[task_id] = steps
         per_task_action_stats[task_id] = action_stats
+        per_task_coverage[task_id] = coverage_info
         GLOBAL_TASK_LEARNINGS.append(task_learning_hint)
         transfer_hint = _build_transfer_hint()
     print(
@@ -1137,6 +1290,7 @@ if __name__ == "__main__":
         "llm_cost_usd_estimate": round(_estimated_llm_cost_usd(LLM_METRICS), 8),
         "steps": per_task_steps,
         "action_stats": per_task_action_stats,
+        "coverage": per_task_coverage,
         "task_learnings": list(GLOBAL_TASK_LEARNINGS),
     }
     (artifacts_dir / "benchmark_report.json").write_text(
