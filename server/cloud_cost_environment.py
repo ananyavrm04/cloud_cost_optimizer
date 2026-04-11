@@ -32,6 +32,7 @@ PRICING_MULTIPLIERS: dict[str, float] = {
 VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 VALID_SIZES = set(SIZE_MULTIPLIERS.keys())
 VALID_PRICING = {"reserved", "spot"}
+SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 ERROR_CODES = {
     "invalid_action": "ERR_INVALID_ACTION_TYPE",
     "not_found": "ERR_RESOURCE_NOT_FOUND",
@@ -242,6 +243,11 @@ class CloudCostEnvironment(Environment):
             self._state.sla_violated = True
 
         reward = cost_saved_ratio - (sla_penalty * 10)
+        # Enhancement #97: partial extra credit for larger single-step downsize jumps.
+        if old_size in SIZE_ORDER and new_size in SIZE_ORDER and cost_saved > 0:
+            jump = SIZE_ORDER.index(old_size) - SIZE_ORDER.index(new_size)
+            if jump > 1:
+                reward += 0.01 * (jump - 1)
 
         done = self._check_done()
         if done:
