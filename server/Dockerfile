@@ -1,15 +1,17 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install dependencies first (layer cache)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies once (openenv-core already included in requirements.txt)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Install openenv-core
-RUN pip install "openenv-core[core]>=0.2.1"
-
-# Copy all project files
-COPY . .
+# Copy only runtime files needed by the environment server
+COPY server /app/server
+COPY tasks /app/tasks
+COPY models.py /app/models.py
+COPY client.py /app/client.py
+COPY __init__.py /app/__init__.py
+COPY openenv.yaml /app/openenv.yaml
 
 # Set PYTHONPATH so absolute imports resolve from /app
 ENV PYTHONPATH=/app
