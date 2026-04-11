@@ -219,6 +219,9 @@ score = agent_savings / optimal_savings
 | `ENV_HEALTH_RETRIES` | Health probe retries before each task (optional, default `5`) |
 | `ENV_HEALTH_BACKOFF_SECONDS` | Exponential backoff base for health probe (optional, default `1.0`) |
 
+Optional file-based config is also supported via `config.yaml` (see `config.yaml.example`).
+Environment variables always take precedence over config file values.
+
 ---
 
 ## Baseline Scores
