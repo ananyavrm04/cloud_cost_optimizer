@@ -3,6 +3,8 @@ import os
 import re
 import time
 from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -13,26 +15,70 @@ from models import CloudCostAction
 
 load_dotenv()
 
+
+def _parse_scalar(value: str):
+    v = value.strip().strip("'\"")
+    if not v:
+        return ""
+    low = v.lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    try:
+        if "." in v:
+            return float(v)
+        return int(v)
+    except ValueError:
+        return v
+
+
+def _load_config_yaml(path: str = "config.yaml") -> dict:
+    # Enhancement #55: optional simple config.yaml support.
+    # Supported format: flat key: value pairs.
+    p = Path(path)
+    if not p.exists():
+        return {}
+    result: dict = {}
+    for line in p.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("#") or ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        result[key.strip()] = _parse_scalar(value)
+    return result
+
+
+CONFIG = _load_config_yaml()
+
+
+def _cfg(name: str, default=None):
+    # env var override > config.yaml > default
+    if name in os.environ:
+        return os.environ[name]
+    if name in CONFIG:
+        return CONFIG[name]
+    return default
+
 # Validator-aligned env handling:
 # - API_BASE_URL and API_KEY must come from injected env vars
 # - MODEL_NAME keeps a local-friendly default
-if "API_BASE_URL" not in os.environ or "API_KEY" not in os.environ:
+SUBMISSION_MODE = str(_cfg("SUBMISSION_MODE", "1")).strip().lower() in {"1", "true", "yes"}
+if SUBMISSION_MODE and ("API_BASE_URL" not in os.environ or "API_KEY" not in os.environ):
     raise RuntimeError("Missing required env vars: API_BASE_URL and API_KEY")
 
-API_BASE_URL = os.environ["API_BASE_URL"]
-MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-20b:fastest")
-API_KEY = os.environ["API_KEY"]
-ENV_URL = os.environ.get("ENV_URL", "http://localhost:7860")
+API_BASE_URL = str(_cfg("API_BASE_URL", "https://router.huggingface.co/v1"))
+MODEL_NAME = str(_cfg("MODEL_NAME", "openai/gpt-oss-20b:fastest"))
+API_KEY = str(_cfg("API_KEY", os.environ.get("HF_TOKEN", "")))
+ENV_URL = str(_cfg("ENV_URL", "http://localhost:7860"))
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
-MAX_STEPS = 100
-LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "20"))
-LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
-HISTORY_WINDOW = int(os.getenv("HISTORY_WINDOW", "5"))
-LLM_FAILURE_THRESHOLD = int(os.getenv("LLM_FAILURE_THRESHOLD", "3"))
-NEGATIVE_STREAK_THRESHOLD = int(os.getenv("NEGATIVE_STREAK_THRESHOLD", "3"))
-ENV_HEALTH_RETRIES = int(os.getenv("ENV_HEALTH_RETRIES", "5"))
-ENV_HEALTH_BACKOFF_SECONDS = float(os.getenv("ENV_HEALTH_BACKOFF_SECONDS", "1.0"))
+MAX_STEPS = int(_cfg("MAX_STEPS", 100))
+LLM_TIMEOUT_SECONDS = float(_cfg("LLM_TIMEOUT_SECONDS", 20))
+LLM_MAX_RETRIES = int(_cfg("LLM_MAX_RETRIES", 2))
+HISTORY_WINDOW = int(_cfg("HISTORY_WINDOW", 5))
+LLM_FAILURE_THRESHOLD = int(_cfg("LLM_FAILURE_THRESHOLD", 3))
+NEGATIVE_STREAK_THRESHOLD = int(_cfg("NEGATIVE_STREAK_THRESHOLD", 3))
+ENV_HEALTH_RETRIES = int(_cfg("ENV_HEALTH_RETRIES", 5))
+ENV_HEALTH_BACKOFF_SECONDS = float(_cfg("ENV_HEALTH_BACKOFF_SECONDS", 1.0))
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -70,6 +116,7 @@ Reply with JSON only:
 VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 VALID_PRICING = {"on_demand", "reserved", "spot"}
+LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _empty_action() -> dict:
@@ -263,7 +310,10 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
     # Enhancement #50: prioritize high-cost resources first.
     running_resources.sort(key=lambda r: float(r.get("cost_per_month", 0.0)), reverse=True)
     dependency_depth = _dependency_depths(running_resources)
+    max_dep_depth = max(dependency_depth.values(), default=0)
     uptime_margin = observation.current_uptime - observation.sla_target
+    savings_abs = max(0.0, observation.original_monthly_cost - observation.current_monthly_cost)
+    savings_pct = (savings_abs / max(observation.original_monthly_cost, 1e-9)) * 100.0
 
     # Enhancement #46: compress prompt when resource count is large.
     if len(running_resources) > 40:
@@ -283,8 +333,10 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
     return (
         f"Current cost: {observation.current_monthly_cost:.2f}\n"
         f"Original cost: {observation.original_monthly_cost:.2f}\n"
+        f"Savings so far: {savings_abs:.2f} ({savings_pct:.2f}%)\n"
         f"Uptime: {observation.current_uptime:.3f} target={observation.sla_target}\n"
         f"Uptime margin: {uptime_margin:.3f}\n"
+        f"Max dependency depth: {max_dep_depth}\n"
         f"Steps remaining: {steps_remaining}\n"
         f"Feedback: {observation.step_feedback}\n"
         f"Observation diff: {observation_diff}\n"
@@ -458,7 +510,7 @@ def _extract_json(raw: str) -> dict:
         return {}
 
 
-def _llm_request(messages: list[dict]) -> dict:
+def _llm_request(messages: list[dict]) -> tuple[dict, dict]:
     response = llm.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
@@ -466,8 +518,18 @@ def _llm_request(messages: list[dict]) -> dict:
         max_tokens=200,
         timeout=LLM_TIMEOUT_SECONDS,
     )
+    usage = getattr(response, "usage", None)
+    usage_dict = {
+        "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+    }
+    LLM_METRICS["calls"] += 1
+    LLM_METRICS["prompt_tokens"] += usage_dict["prompt_tokens"]
+    LLM_METRICS["completion_tokens"] += usage_dict["completion_tokens"]
+    LLM_METRICS["total_tokens"] += usage_dict["total_tokens"]
     raw = (response.choices[0].message.content or "").strip()
-    return _extract_json(raw)
+    return _extract_json(raw), usage_dict
 
 
 def call_llm(user_prompt: str) -> tuple[dict, bool]:
@@ -478,7 +540,7 @@ def call_llm(user_prompt: str) -> tuple[dict, bool]:
 
     for attempt in range(max(1, LLM_MAX_RETRIES)):
         try:
-            parsed = _llm_request(messages)
+            parsed, _ = _llm_request(messages)
             if parsed:
                 return parsed, True
 
@@ -492,7 +554,7 @@ def call_llm(user_prompt: str) -> tuple[dict, bool]:
                     ),
                 }
             ]
-            parsed = _llm_request(repair_messages)
+            parsed, _ = _llm_request(repair_messages)
             if parsed:
                 return parsed, True
         except Exception as exc:
@@ -539,7 +601,7 @@ def wait_for_env_health() -> None:
     raise RuntimeError(f"Environment health check failed at {health_url}: {last_error}")
 
 
-def run_task(task_id: str) -> float:
+def run_task(task_id: str) -> tuple[float, int]:
     print(f"[START] task={task_id}", flush=True)
     wait_for_env_health()
     with CloudCostEnv(base_url=ENV_URL).sync() as env:
@@ -564,6 +626,7 @@ def run_task(task_id: str) -> float:
         for step_idx in range(1, MAX_STEPS + 1):
             steps_remaining = MAX_STEPS - step_idx + 1
             state_snapshot = env.state()
+            projected_if_skip = compute_score(state_snapshot)
             # Early completion on full optimization (Enhancement #21).
             if (
                 state_snapshot.optimal_savings
@@ -585,7 +648,14 @@ def run_task(task_id: str) -> float:
                 raw_action, llm_ok = call_llm(
                     build_user_prompt(
                         observation=observation,
-                        step_history=list(step_history),
+                        step_history=list(step_history)
+                        + [
+                            (
+                                "progress total_savings="
+                                f"{state_snapshot.total_savings:.2f} optimal_savings={state_snapshot.optimal_savings:.2f} "
+                                f"savings_progress={projected_if_skip:.4f}"
+                            )
+                        ],
                         steps_remaining=steps_remaining,
                         observation_diff=last_observation_diff,
                     )
@@ -621,6 +691,22 @@ def run_task(task_id: str) -> float:
                     new_pricing=fallback_data.get("new_pricing", ""),
                 )
                 current_action_key = (action.action_type, action.resource_id, action.new_size, action.new_pricing)
+            # Enhancement #48: avoid clearly non-positive expected reward actions.
+            if action.action_type != "skip":
+                resource_map = {r.get("id"): r for r in observation.resources if r.get("status") == "running"}
+                resource = resource_map.get(action.resource_id)
+                if resource is not None:
+                    predicted = _expected_savings(
+                        {
+                            "action_type": action.action_type,
+                            "resource_id": action.resource_id,
+                            "new_size": action.new_size,
+                            "new_pricing": action.new_pricing,
+                        },
+                        resource,
+                    )
+                    if predicted <= 0:
+                        action = CloudCostAction(**_empty_action())
 
             result = env.step(action)
             last_observation = observation
@@ -631,7 +717,8 @@ def run_task(task_id: str) -> float:
             blocked_actions.add((action.action_type, action.resource_id, action.new_size, action.new_pricing))
             step_history.append(
                 f"step={step_idx} action={action.action_type} target={action.resource_id or '-'} "
-                f"reward={result.reward:.4f} feedback={observation.step_feedback}"
+                f"reward={result.reward:.4f} projected_if_skip={projected_if_skip:.4f} "
+                f"feedback={observation.step_feedback}"
             )
 
             if result.reward < 0:
@@ -651,17 +738,34 @@ def run_task(task_id: str) -> float:
 
         score = compute_score(env.state())
         print(f"[END] task={task_id} score={score:.4f} steps={steps_executed}", flush=True)
-        return score
+        return score, steps_executed
 
 
 if __name__ == "__main__":
     mode = "llm-required"
     print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
+    per_task_steps: dict[str, int] = {}
     for task_id in ["easy", "medium", "hard"]:
-        score = run_task(task_id)
+        score, steps = run_task(task_id)
         scores[task_id] = score
+        per_task_steps[task_id] = steps
     print(
         f"[SUMMARY] easy={scores['easy']:.4f} medium={scores['medium']:.4f} hard={scores['hard']:.4f}",
         flush=True,
+    )
+    # Enhancement #94: standardized benchmark export.
+    artifacts_dir = Path("artifacts")
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "model": MODEL_NAME,
+        "api_base_url": API_BASE_URL,
+        "submission_mode": SUBMISSION_MODE,
+        "scores": scores,
+        "llm_usage": dict(LLM_METRICS),
+        "steps": per_task_steps,
+    }
+    (artifacts_dir / "benchmark_report.json").write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
     )
