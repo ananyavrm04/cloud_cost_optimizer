@@ -1,8 +1,23 @@
 .env
+config.yaml
 .pytest_cache/
+.pytest_tmp_*/
 __pycache__/
 .tmp/
 *.pyc
+.pyo
+.pyd
+.Python
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+artifacts/
+.vscode/
+*.log
+Thumbs.db
+.DS_Store
 opus antigravity/
 ENHANCEMENTS.md
 FUNCTIONALITIES.md
