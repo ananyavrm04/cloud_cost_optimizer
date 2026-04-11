@@ -195,6 +195,7 @@ score = agent_savings / optimal_savings
 |----------|-------------|
 | `API_BASE_URL` | OpenAI-compatible LLM endpoint (required) |
 | `API_KEY` | API key for the above endpoint (required) |
+| `SUBMISSION_MODE` | `1/true` enforces strict validator-safe env requirements (default enabled) |
 | `MODEL_NAME` | Model identifier (required) |
 | `ENV_URL` | Server URL; defaults to `http://localhost:7860` (optional) |
 | `ENV_HEALTH_RETRIES` | Health probe retries before each task (optional, default `5`) |
@@ -218,6 +219,17 @@ score = agent_savings / optimal_savings
 python -m pytest tests/test_env.py -v
 ```
 
+### Local Pre-Submit Validator
+
+```bash
+python scripts/pre_submit_check.py
+```
+
+Checks:
+- required env vars
+- required structured stdout blocks
+- score range `(0,1)` for all tasks
+
 ### Dockerized End-to-End Check
 
 ```powershell
@@ -237,6 +249,19 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 - `ruff` lint (non-blocking)
 - `mypy` type-check (non-blocking)
 - `pytest tests/test_env.py` (blocking)
+
+---
+
+## Artifacts
+
+After `python inference.py`, benchmark metrics are exported to:
+
+- `artifacts/benchmark_report.json`
+
+Includes:
+- task scores
+- token usage totals
+- model/base URL metadata
 
 ---
 
