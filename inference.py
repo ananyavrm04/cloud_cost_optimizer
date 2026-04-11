@@ -102,6 +102,7 @@ INTERACTIVE_MODE = str(_cfg("INTERACTIVE_MODE", "0")).lower() in {"1", "true", "
 ENSEMBLE_VOTES = int(_cfg("ENSEMBLE_VOTES", 1))
 ENSEMBLE_TEMPERATURE = float(_cfg("ENSEMBLE_TEMPERATURE", 0.1))
 WARM_START_STEPS = int(_cfg("WARM_START_STEPS", 0))
+PROMPT_MAX_CHARS = int(_cfg("PROMPT_MAX_CHARS", 12000))
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -156,6 +157,17 @@ LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_to
 LLM_METRICS_BY_MODEL: dict[str, dict[str, int]] = {}
 PROMPT_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
 GLOBAL_TASK_LEARNINGS: list[str] = []
+ERROR_CODE_POLICY = {
+    "ERR_RESOURCE_NOT_FOUND": {"block_action": True, "fallback_heuristic": True},
+    "ERR_ALREADY_TERMINATED": {"block_action": True, "fallback_heuristic": True},
+    "ERR_INVALID_SIZE": {"block_action": True, "fallback_heuristic": True},
+    "ERR_SAME_SIZE": {"block_action": True, "fallback_heuristic": True},
+    "ERR_INVALID_PRICING": {"block_action": True, "fallback_heuristic": True},
+    "ERR_PRICING_NOT_ELIGIBLE": {"block_action": True, "fallback_heuristic": True},
+    "ERR_SAME_PRICING": {"block_action": True, "fallback_heuristic": True},
+    "ERR_INVALID_ACTION_TYPE": {"increment_llm_failures": True, "fallback_heuristic": True},
+    "ERR_CRITICAL_TERMINATION_BLOCKED": {"block_action": True, "fallback_heuristic": True},
+}
 
 
 def _empty_action() -> dict:
@@ -398,6 +410,14 @@ def build_user_prompt(
         f"Recent history:\n{history_block}\n"
         f"Running resources:\n" + "\n".join(resources)
     )
+
+
+def _enforce_prompt_budget(prompt_text: str) -> str:
+    # Deterministic prompt-size limiter (rough token budget proxy via chars).
+    if PROMPT_MAX_CHARS <= 0 or len(prompt_text) <= PROMPT_MAX_CHARS:
+        return prompt_text
+    clipped = prompt_text[: PROMPT_MAX_CHARS - 32]
+    return clipped + "\n[TRUNCATED_FOR_BUDGET]\n"
 
 
 def heuristic_action(observation, blocked_actions: set[tuple]) -> dict:
@@ -835,26 +855,36 @@ def _observation_hash(observation) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _warm_start_actions(task_id: str) -> list[dict[str, str]]:
-    # Enhancement #57: bounded warm-start sequence.
-    seeds = {
-        "easy": [
-            {"action_type": "terminate", "resource_id": "web-server-1", "new_size": "", "new_pricing": ""},
-            {"action_type": "terminate", "resource_id": "web-server-2", "new_size": "", "new_pricing": ""},
-            {"action_type": "terminate", "resource_id": "web-server-3", "new_size": "", "new_pricing": ""},
-        ],
-        "medium": [
-            {"action_type": "resize", "resource_id": "oversized-compute-1", "new_size": "medium", "new_pricing": ""},
-            {"action_type": "resize", "resource_id": "oversized-compute-2", "new_size": "medium", "new_pricing": ""},
-            {"action_type": "terminate", "resource_id": "idle-web-1", "new_size": "", "new_pricing": ""},
-        ],
-        "hard": [
-            {"action_type": "resize", "resource_id": "oversized-compute-1", "new_size": "medium", "new_pricing": ""},
-            {"action_type": "resize", "resource_id": "oversized-compute-2", "new_size": "medium", "new_pricing": ""},
-            {"action_type": "terminate", "resource_id": "idle-lw-1", "new_size": "", "new_pricing": ""},
-        ],
-    }
-    return seeds.get(task_id, [])
+def _build_warm_start_plan(observation) -> list[dict[str, str]]:
+    # Enhancement #57 (dynamic): derive warm-start from current observation, no hardcoded IDs.
+    running = [r for r in observation.resources if r.get("status") == "running"]
+    dep_depth = _dependency_depths(running)
+    candidates: list[tuple[float, dict[str, str]]] = []
+    for r in running:
+        if (
+            not r.get("is_critical", True)
+            and dep_depth.get(r["id"], 0) == 0
+            and r.get("cpu_usage_avg", 100.0) < 8.0
+            and r.get("mem_usage_avg", 100.0) < 15.0
+        ):
+            action = {"action_type": "terminate", "resource_id": r["id"], "new_size": "", "new_pricing": ""}
+            candidates.append((_expected_savings(action, r), action))
+
+        if (
+            not r.get("is_critical", False)
+            and dep_depth.get(r["id"], 0) == 0
+            and r.get("size") in {"medium", "large", "xlarge"}
+            and r.get("cpu_usage_avg", 100.0) < 45.0
+        ):
+            action = {
+                "action_type": "resize",
+                "resource_id": r["id"],
+                "new_size": _next_downsize(r.get("size", "")),
+                "new_pricing": "",
+            }
+            candidates.append((_expected_savings(action, r), action))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [x[1] for x in candidates[: max(0, WARM_START_STEPS)]]
 
 
 def _confirm_action(action_data: dict, task_id: str, step_idx: int) -> dict:
@@ -932,7 +962,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
         initial_observation = observation
         estimated_optimal_actions = _estimated_optimal_actions(initial_observation)
         initial_resource_map = {r.get("id", ""): r for r in initial_observation.resources}
-        warm_start_plan = _warm_start_actions(task_id)
+        warm_start_plan = _build_warm_start_plan(observation)
         explored_actions: set[tuple] = set()
         max_possible_actions = _count_possible_actions(observation)
 
@@ -989,6 +1019,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                     observation_diff=last_observation_diff,
                     transfer_hint=transfer_hint,
                 )
+                prompt_text = _enforce_prompt_budget(prompt_text)
                 raw_action, llm_ok, usage, raw_content = call_llm(
                     prompt_text,
                     list(llm_message_history),
@@ -1100,17 +1131,10 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 error_code = str(observation.metadata.get("error_code", "") or "")
             if error_code:
                 # Enhancement #69: consume structured server error codes and adapt.
-                if error_code in {
-                    "ERR_RESOURCE_NOT_FOUND",
-                    "ERR_ALREADY_TERMINATED",
-                    "ERR_INVALID_SIZE",
-                    "ERR_SAME_SIZE",
-                    "ERR_INVALID_PRICING",
-                    "ERR_PRICING_NOT_ELIGIBLE",
-                    "ERR_SAME_PRICING",
-                }:
+                policy = ERROR_CODE_POLICY.get(error_code, {})
+                if policy.get("block_action"):
                     blocked_actions.add(current_action_key)
-                if error_code == "ERR_INVALID_ACTION_TYPE":
+                if policy.get("increment_llm_failures"):
                     consecutive_llm_failures += 1
                     if consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
                         llm_unavailable = True
