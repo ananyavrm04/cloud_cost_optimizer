@@ -830,6 +830,66 @@ def _write_json_artifact(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _append_benchmark_history(report: dict) -> None:
+    # Enhancement #94 extension: keep benchmark trend history (append-only).
+    artifacts_dir = Path("artifacts")
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    history_jsonl = artifacts_dir / "benchmark_history.jsonl"
+    history_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with history_jsonl.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(report, ensure_ascii=True) + "\n")
+
+    # Build lightweight rolling summary from history file.
+    entries: list[dict] = []
+    for line in history_jsonl.read_text(encoding="utf-8").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw)
+            if isinstance(item, dict):
+                entries.append(item)
+        except json.JSONDecodeError:
+            continue
+
+    if not entries:
+        return
+
+    def _score_of(e: dict, task: str) -> float:
+        try:
+            return float(e.get("scores", {}).get(task, 0.0))
+        except Exception:
+            return 0.0
+
+    def _avg_of(e: dict) -> float:
+        return (_score_of(e, "easy") + _score_of(e, "medium") + _score_of(e, "hard")) / 3.0
+
+    best = max(entries, key=_avg_of)
+    latest = entries[-1]
+    summary = {
+        "total_runs": len(entries),
+        "latest": {
+            "timestamp_utc": latest.get("timestamp_utc", ""),
+            "avg_score": round(_avg_of(latest), 6),
+            "scores": latest.get("scores", {}),
+            "model": latest.get("model", ""),
+            "prompt_version": latest.get("prompt_version", ""),
+        },
+        "best_avg": {
+            "timestamp_utc": best.get("timestamp_utc", ""),
+            "avg_score": round(_avg_of(best), 6),
+            "scores": best.get("scores", {}),
+            "model": best.get("model", ""),
+            "prompt_version": best.get("prompt_version", ""),
+        },
+        "last_5_avg_scores": [round(_avg_of(e), 6) for e in entries[-5:]],
+    }
+    (artifacts_dir / "benchmark_trend.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+
+
 def _estimated_llm_cost_usd(metrics: dict[str, int]) -> float:
     # Enhancement #84: simple token-based cost accounting.
     prompt_cost = (metrics.get("prompt_tokens", 0) / 1000.0) * PROMPT_COST_PER_1K_TOKENS
@@ -1320,3 +1380,4 @@ if __name__ == "__main__":
     (artifacts_dir / "benchmark_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
+    _append_benchmark_history(report)
