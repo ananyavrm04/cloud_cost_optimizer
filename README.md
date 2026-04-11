@@ -34,6 +34,24 @@ The agent's job is to:
 
 ---
 
+## What We Actually Built
+
+This project is not just a basic "call LLM and take action" loop. We built it as a reliable optimization system that can survive real hackathon validator conditions and still produce clean, interpretable output.
+
+The agent reasons step-by-step over cloud resources, but it is constrained by safety and consistency checks so it does not blindly optimize cost at the expense of uptime. We added dependency-aware guardrails, action normalization, and risk-aware ranking so high-impact but risky moves are filtered or deprioritized.
+
+We also focused heavily on reliability under real-world failure modes. If the LLM response is malformed, the parser recovers deterministically. If API calls fail or rate-limit, retries and graceful fallback logic prevent crashes. If the environment is unavailable, health probes with retry/backoff prevent invalid runs before they start.
+
+A major submission requirement was structured stdout parsing. Our inference pipeline emits strict `[START]`, `[STEP]`, and `[END]` blocks with flush-safe logging, so validators can parse every episode deterministically. We also enforce score output strictly inside `(0,1)` to satisfy validator range constraints.
+
+For engineering quality, we added task schema validation, runtime environment-state invariants, CI automation, and dockerized end-to-end testing with a mock OpenAI-compatible LLM server. This makes the repo reproducible for both reviewers and deployment.
+
+If you want the full implementation inventory and future roadmap:
+- See `FUNCTIONALITIES.md` for implemented capabilities.
+- See `ENHANCEMENTS.md` for the complete enhancement backlog and priorities.
+
+---
+
 ## Action Space
 
 The agent can take exactly one of these four actions per step:
