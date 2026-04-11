@@ -256,6 +256,28 @@ Checks:
 - required structured stdout blocks
 - score range `(0,1)` for all tasks
 
+### One-Command Full Pre-Submit (Windows PowerShell)
+
+```powershell
+./scripts/full_presubmit.ps1
+```
+
+This runs:
+- `python inference.py`
+- `python scripts/pre_submit_check.py`
+
+### Prompt Version Comparison
+
+```bash
+python scripts/compare_prompts.py
+```
+
+Optional versions:
+
+```bash
+python scripts/compare_prompts.py v1 v2
+```
+
 ### Dockerized End-to-End Check
 
 ```powershell
@@ -292,6 +314,16 @@ Includes:
 - per-task action success stats and transfer-learning hints
 - per-step traces in `artifacts/traces/`
 - estimated-optimal diff reports in `artifacts/optimal_diff/`
+
+### Structured Stdout Tags
+
+- `[START]`: task start marker for parser
+- `[STEP]`: step-by-step action, reward, done signal
+- `[END]`: per-task score and steps
+- `[SUMMARY]`: final task score summary
+- `[TOKENS]`: optional per-step token usage (`EMIT_TOKEN_LOGS=1`)
+- `[PROJECTED]`: optional projected score-if-skip (`EMIT_PROJECTED_LOGS=1`)
+- `[STATS]`: per-task action success statistics
 
 ---
 
