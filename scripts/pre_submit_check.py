@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 
 def fail(msg: str) -> int:
@@ -42,6 +43,13 @@ def main() -> int:
 
     if "[START]" not in stdout or "[STEP]" not in stdout or "[END]" not in stdout:
         return fail("Structured output missing one of [START]/[STEP]/[END]")
+    if "[SUMMARY]" not in stdout:
+        return fail("Structured output missing [SUMMARY] line")
+
+    starts = re.findall(r"^\[START\]\s+task=(\w+)\s*$", stdout, flags=re.MULTILINE)
+    ends = re.findall(r"^\[END\]\s+task=(\w+)\s+score=([0-9.]+)\s+steps=\d+\s*$", stdout, flags=re.MULTILINE)
+    if len(starts) != 3 or len(ends) != 3:
+        return fail("Expected exactly 3 [START] and 3 [END] lines")
 
     end_scores = re.findall(r"\[END\]\s+task=\w+\s+score=([0-9.]+)", stdout)
     if len(end_scores) != 3:
@@ -54,6 +62,10 @@ def main() -> int:
             return fail(f"Invalid numeric score: {s}")
         if not (0.0 < value < 1.0):
             return fail(f"Score out of range (0,1): {value}")
+
+    benchmark_path = Path("artifacts/benchmark_report.json")
+    if not benchmark_path.exists():
+        return fail("Missing artifacts/benchmark_report.json after run")
 
     print("[OK] pre-submit checks passed")
     return 0

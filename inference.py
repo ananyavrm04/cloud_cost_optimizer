@@ -85,6 +85,13 @@ PROMPT_CACHE_ENABLED = str(_cfg("PROMPT_CACHE_ENABLED", "1")).lower() in {"1", "
 EMIT_TOKEN_LOGS = str(_cfg("EMIT_TOKEN_LOGS", "0")).lower() in {"1", "true", "yes"}
 LLM_CONTEXT_WINDOW = int(_cfg("LLM_CONTEXT_WINDOW", 8))
 ENV_CALL_RETRIES = int(_cfg("ENV_CALL_RETRIES", 2))
+NOOP_STREAK_THRESHOLD = int(_cfg("NOOP_STREAK_THRESHOLD", 3))
+FALLBACK_MODEL_NAME = str(_cfg("FALLBACK_MODEL_NAME", "")).strip()
+MODEL_FALLBACKS = [
+    m.strip()
+    for m in str(_cfg("MODEL_FALLBACKS", "")).split(",")
+    if m.strip()
+]
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -123,6 +130,7 @@ VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 VALID_PRICING = {"on_demand", "reserved", "spot"}
 LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+LLM_METRICS_BY_MODEL: dict[str, dict[str, int]] = {}
 PROMPT_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
 
 
@@ -538,14 +546,14 @@ def _cache_key(messages: list[dict]) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _llm_request(messages: list[dict]) -> tuple[dict, dict, str]:
+def _llm_request(messages: list[dict], model_name: str) -> tuple[dict, dict, str]:
     if PROMPT_CACHE_ENABLED:
-        key = _cache_key(messages)
+        key = f"{model_name}:{_cache_key(messages)}"
         cached = PROMPT_RESPONSE_CACHE.get(key)
         if cached is not None:
             return dict(cached.get("parsed", {})), {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, str(cached.get("raw", ""))
     response = llm.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=messages,
         temperature=0.0,
         max_tokens=200,
@@ -561,6 +569,13 @@ def _llm_request(messages: list[dict]) -> tuple[dict, dict, str]:
     LLM_METRICS["prompt_tokens"] += usage_dict["prompt_tokens"]
     LLM_METRICS["completion_tokens"] += usage_dict["completion_tokens"]
     LLM_METRICS["total_tokens"] += usage_dict["total_tokens"]
+    per_model = LLM_METRICS_BY_MODEL.setdefault(
+        model_name, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    )
+    per_model["calls"] += 1
+    per_model["prompt_tokens"] += usage_dict["prompt_tokens"]
+    per_model["completion_tokens"] += usage_dict["completion_tokens"]
+    per_model["total_tokens"] += usage_dict["total_tokens"]
     raw = (response.choices[0].message.content or "").strip()
     parsed = _extract_json(raw)
     if PROMPT_CACHE_ENABLED:
@@ -575,39 +590,46 @@ def call_llm(user_prompt: str, message_history: list[dict]) -> tuple[dict, bool,
         {"role": "user", "content": user_prompt},
     ]
     usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    candidate_models = [MODEL_NAME]
+    if FALLBACK_MODEL_NAME:
+        candidate_models.append(FALLBACK_MODEL_NAME)
+    candidate_models.extend(MODEL_FALLBACKS)
+    # Keep stable order and remove duplicates.
+    dedup_models = list(dict.fromkeys(candidate_models))
 
-    for attempt in range(max(1, LLM_MAX_RETRIES)):
-        try:
-            parsed, usage, raw = _llm_request(messages)
-            for k in usage_total:
-                usage_total[k] += int(usage.get(k, 0))
-            if parsed:
-                return parsed, True, usage_total, raw
+    for model_name in dedup_models:
+        for attempt in range(max(1, LLM_MAX_RETRIES)):
+            try:
+                parsed, usage, raw = _llm_request(messages, model_name=model_name)
+                for k in usage_total:
+                    usage_total[k] += int(usage.get(k, 0))
+                if parsed:
+                    return parsed, True, usage_total, raw
 
-            # Deterministic parse recovery prompt
-            repair_messages = messages + [
-                {
-                    "role": "user",
-                    "content": (
-                        "Return ONLY valid JSON with keys: action_type, resource_id, "
-                        "new_size, new_pricing. No extra text."
-                    ),
-                }
-            ]
-            parsed, usage, raw = _llm_request(repair_messages)
-            for k in usage_total:
-                usage_total[k] += int(usage.get(k, 0))
-            if parsed:
-                return parsed, True, usage_total, raw
-        except Exception as exc:
-            # Enhancement #73: bounded exponential backoff on rate limit.
-            status_code = getattr(exc, "status_code", None)
-            response = getattr(exc, "response", None)
-            if status_code is None and response is not None:
-                status_code = getattr(response, "status_code", None)
-            if status_code == 429 and attempt < max(1, LLM_MAX_RETRIES) - 1:
-                time.sleep(min(2.0, 0.5 * (2 ** attempt)))
-            continue
+                # Deterministic parse recovery prompt
+                repair_messages = messages + [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Return ONLY valid JSON with keys: action_type, resource_id, "
+                            "new_size, new_pricing. No extra text."
+                        ),
+                    }
+                ]
+                parsed, usage, raw = _llm_request(repair_messages, model_name=model_name)
+                for k in usage_total:
+                    usage_total[k] += int(usage.get(k, 0))
+                if parsed:
+                    return parsed, True, usage_total, raw
+            except Exception as exc:
+                # Enhancement #73: bounded exponential backoff on rate limit.
+                status_code = getattr(exc, "status_code", None)
+                response = getattr(exc, "response", None)
+                if status_code is None and response is not None:
+                    status_code = getattr(response, "status_code", None)
+                if status_code == 429 and attempt < max(1, LLM_MAX_RETRIES) - 1:
+                    time.sleep(min(2.0, 0.5 * (2 ** attempt)))
+                continue
 
     # Graceful degradation trigger
     return {}, False, usage_total, ""
@@ -722,6 +744,17 @@ def _write_json_artifact(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _observation_hash(observation) -> str:
+    payload = {
+        "resources": observation.resources,
+        "current_monthly_cost": observation.current_monthly_cost,
+        "current_uptime": observation.current_uptime,
+        "sla_target": observation.sla_target,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(raw.encode("utf-8")).hexdigest()
+
+
 def run_task(task_id: str) -> tuple[float, int]:
     print(f"[START] task={task_id}", flush=True)
     wait_for_env_health()
@@ -754,6 +787,8 @@ def run_task(task_id: str) -> tuple[float, int]:
         llm_message_history: deque[dict] = deque(maxlen=max(0, LLM_CONTEXT_WINDOW * 2))
         executed_actions: list[CloudCostAction] = []
         trace_rows: list[dict] = []
+        no_change_streak = 0
+        last_obs_hash = _observation_hash(observation)
         initial_observation = observation
         estimated_optimal_actions = _estimated_optimal_actions(initial_observation)
 
@@ -775,11 +810,17 @@ def run_task(task_id: str) -> tuple[float, int]:
                 and state_snapshot.total_savings >= state_snapshot.optimal_savings
             ):
                 break
+            if no_change_streak >= NOOP_STREAK_THRESHOLD:
+                action_data = _empty_action()
+            else:
+                action_data = None
             if state_snapshot.sla_violated:
                 sla_damaged = True
 
             # Enhancement #63: once SLA is violated, switch to damage-control.
-            if sla_damaged or observation.current_uptime < observation.sla_target:
+            if action_data is not None:
+                pass
+            elif sla_damaged or observation.current_uptime < observation.sla_target:
                 action_data = _empty_action()
             elif consecutive_negative >= NEGATIVE_STREAK_THRESHOLD:
                 action_data = _empty_action()
@@ -873,6 +914,12 @@ def run_task(task_id: str) -> tuple[float, int]:
             steps_executed = step_idx
             last_observation_diff = _summarize_observation_diff(last_observation, observation)
             executed_actions.append(action)
+            new_obs_hash = _observation_hash(observation)
+            if new_obs_hash == last_obs_hash:
+                no_change_streak += 1
+            else:
+                no_change_streak = 0
+            last_obs_hash = new_obs_hash
 
             blocked_actions.add((action.action_type, action.resource_id, action.new_size, action.new_pricing))
             step_history.append(
@@ -901,6 +948,7 @@ def run_task(task_id: str) -> tuple[float, int]:
                     "feedback": observation.step_feedback,
                     "current_monthly_cost": float(observation.current_monthly_cost),
                     "current_uptime": float(observation.current_uptime),
+                    "no_change_streak": no_change_streak,
                 }
             )
 
@@ -986,10 +1034,13 @@ if __name__ == "__main__":
     report = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model": MODEL_NAME,
+        "fallback_model_name": FALLBACK_MODEL_NAME,
+        "model_fallbacks": MODEL_FALLBACKS,
         "api_base_url": API_BASE_URL,
         "submission_mode": SUBMISSION_MODE,
         "scores": scores,
         "llm_usage": dict(LLM_METRICS),
+        "llm_usage_by_model": dict(LLM_METRICS_BY_MODEL),
         "steps": per_task_steps,
     }
     (artifacts_dir / "benchmark_report.json").write_text(

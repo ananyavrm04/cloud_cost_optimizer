@@ -216,6 +216,9 @@ score = agent_savings / optimal_savings
 | `ENV_URL` | Server URL; defaults to `http://localhost:7860` (optional) |
 | `ENV_HEALTH_RETRIES` | Health probe retries before each task (optional, default `5`) |
 | `ENV_HEALTH_BACKOFF_SECONDS` | Exponential backoff base for health probe (optional, default `1.0`) |
+| `FALLBACK_MODEL_NAME` | Optional backup model for automatic fallback if primary model fails/parses badly |
+| `MODEL_FALLBACKS` | Optional comma-separated extra fallback models after `MODEL_NAME` and `FALLBACK_MODEL_NAME` |
+| `NOOP_STREAK_THRESHOLD` | Auto-skip after repeated unchanged observations (optional, default `3`) |
 
 Optional file-based config is also supported via `config.yaml` (see `config.yaml.example`).
 Environment variables always take precedence over config file values.
