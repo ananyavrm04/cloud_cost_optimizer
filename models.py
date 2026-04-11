@@ -43,6 +43,7 @@ class CloudCostAction(Action):
 class CloudCostObservation(Observation):
     """Observation returned to the agent after each reset or step."""
 
+    schema_version: str = "1.0"
     resources: List[Dict[str, Any]] = Field(default_factory=list)
     current_monthly_cost: float = 0.0
     original_monthly_cost: float = 0.0

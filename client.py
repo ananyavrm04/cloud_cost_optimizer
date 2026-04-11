@@ -31,6 +31,7 @@ class CloudCostEnv(EnvClient[CloudCostAction, CloudCostObservation, CloudCostSta
         """Deserialize server response into StepResult."""
         obs_data = payload.get("observation", {})
         observation = CloudCostObservation(
+            schema_version=obs_data.get("schema_version", "1.0"),
             resources=obs_data.get("resources", []),
             current_monthly_cost=obs_data.get("current_monthly_cost", 0.0),
             original_monthly_cost=obs_data.get("original_monthly_cost", 0.0),

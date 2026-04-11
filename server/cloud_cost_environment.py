@@ -356,6 +356,7 @@ class CloudCostEnvironment(Environment):
             r.cost_per_month for r in self._resources if r.status != "terminated"
         )
         return CloudCostObservation(
+            schema_version="1.0",
             resources=[r.model_dump() for r in self._resources],
             current_monthly_cost=round(current_cost, 2),
             original_monthly_cost=round(self._original_cost, 2),
