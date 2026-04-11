@@ -339,6 +339,8 @@ Includes:
 - per-task action success stats and transfer-learning hints
 - per-step traces in `artifacts/traces/`
 - estimated-optimal diff reports in `artifacts/optimal_diff/`
+- append-only benchmark history in `artifacts/benchmark_history.jsonl`
+- rolling trend summary in `artifacts/benchmark_trend.json`
 
 ### Structured Stdout Tags
 
