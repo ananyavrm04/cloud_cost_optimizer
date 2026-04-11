@@ -18,3 +18,8 @@ dependencies = [
 
 [project.scripts]
 server = "server.app:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests requiring live server process",
+]
