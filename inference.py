@@ -72,6 +72,7 @@ MODEL_NAME = str(_cfg("MODEL_NAME", "openai/gpt-oss-20b:fastest"))
 API_KEY = str(_cfg("API_KEY", os.environ.get("HF_TOKEN", "")))
 ENV_URL = str(_cfg("ENV_URL", "http://localhost:7860"))
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+PROMPT_VERSION = str(_cfg("PROMPT_VERSION", "v1")).strip()
 
 MAX_STEPS = int(_cfg("MAX_STEPS", 100))
 LLM_TIMEOUT_SECONDS = float(_cfg("LLM_TIMEOUT_SECONDS", 20))
@@ -92,10 +93,13 @@ MODEL_FALLBACKS = [
     for m in str(_cfg("MODEL_FALLBACKS", "")).split(",")
     if m.strip()
 ]
+EMIT_PROJECTED_LOGS = str(_cfg("EMIT_PROJECTED_LOGS", "0")).lower() in {"1", "true", "yes"}
+PROMPT_COST_PER_1K_TOKENS = float(_cfg("PROMPT_COST_PER_1K_TOKENS", 0.0))
+COMPLETION_COST_PER_1K_TOKENS = float(_cfg("COMPLETION_COST_PER_1K_TOKENS", 0.0))
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-SYSTEM_PROMPT = """You are a cloud cost optimization agent.
+DEFAULT_SYSTEM_PROMPT = """You are a cloud cost optimization agent.
 Reduce monthly cloud cost while preserving uptime (>= 99.9%).
 
 You can choose one action:
@@ -126,12 +130,26 @@ Reply with JSON only:
 }
 """
 
+
+def _load_system_prompt() -> str:
+    # Enhancement #83: versioned prompts via prompts/<version>.txt.
+    prompt_path = Path("prompts") / f"{PROMPT_VERSION}.txt"
+    if prompt_path.exists():
+        text = prompt_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return DEFAULT_SYSTEM_PROMPT
+
+
+SYSTEM_PROMPT = _load_system_prompt()
+
 VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 VALID_PRICING = {"on_demand", "reserved", "spot"}
 LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 LLM_METRICS_BY_MODEL: dict[str, dict[str, int]] = {}
 PROMPT_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
+GLOBAL_TASK_LEARNINGS: list[str] = []
 
 
 def _empty_action() -> dict:
@@ -320,7 +338,13 @@ def _compress_resources_for_prompt(running_resources: list[dict], dependency_dep
     return lines
 
 
-def build_user_prompt(observation, step_history: list[str], steps_remaining: int, observation_diff: str) -> str:
+def build_user_prompt(
+    observation,
+    step_history: list[str],
+    steps_remaining: int,
+    observation_diff: str,
+    transfer_hint: str = "",
+) -> str:
     running_resources = [r for r in observation.resources if r.get("status") == "running"]
     # Enhancement #50: prioritize high-cost resources first.
     running_resources.sort(key=lambda r: float(r.get("cost_per_month", 0.0)), reverse=True)
@@ -352,6 +376,7 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
             )
 
     history_block = "\n".join(step_history) if step_history else "(none)"
+    transfer_block = transfer_hint if transfer_hint else "(none)"
     return (
         f"Current cost: {observation.current_monthly_cost:.2f}\n"
         f"Original cost: {observation.original_monthly_cost:.2f}\n"
@@ -363,6 +388,7 @@ def build_user_prompt(observation, step_history: list[str], steps_remaining: int
         f"Steps remaining: {steps_remaining}\n"
         f"Feedback: {observation.step_feedback}\n"
         f"Observation diff: {observation_diff}\n"
+        f"Transfer hint from previous tasks: {transfer_block}\n"
         f"Recent history:\n{history_block}\n"
         f"Running resources:\n" + "\n".join(resources)
     )
@@ -744,6 +770,20 @@ def _write_json_artifact(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _estimated_llm_cost_usd(metrics: dict[str, int]) -> float:
+    # Enhancement #84: simple token-based cost accounting.
+    prompt_cost = (metrics.get("prompt_tokens", 0) / 1000.0) * PROMPT_COST_PER_1K_TOKENS
+    completion_cost = (metrics.get("completion_tokens", 0) / 1000.0) * COMPLETION_COST_PER_1K_TOKENS
+    return prompt_cost + completion_cost
+
+
+def _build_transfer_hint() -> str:
+    # Enhancement #89: transfer learning hints across tasks.
+    if not GLOBAL_TASK_LEARNINGS:
+        return ""
+    return " | ".join(GLOBAL_TASK_LEARNINGS[-6:])
+
+
 def _observation_hash(observation) -> str:
     payload = {
         "resources": observation.resources,
@@ -755,7 +795,7 @@ def _observation_hash(observation) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def run_task(task_id: str) -> tuple[float, int]:
+def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, dict[str, dict[str, int]]]:
     print(f"[START] task={task_id}", flush=True)
     wait_for_env_health()
     ctx, env = _connect_env()
@@ -787,10 +827,17 @@ def run_task(task_id: str) -> tuple[float, int]:
         llm_message_history: deque[dict] = deque(maxlen=max(0, LLM_CONTEXT_WINDOW * 2))
         executed_actions: list[CloudCostAction] = []
         trace_rows: list[dict] = []
+        action_stats = {
+            "terminate": {"attempted": 0, "positive": 0, "non_positive": 0},
+            "resize": {"attempted": 0, "positive": 0, "non_positive": 0},
+            "switch_pricing": {"attempted": 0, "positive": 0, "non_positive": 0},
+            "skip": {"attempted": 0, "positive": 0, "non_positive": 0},
+        }
         no_change_streak = 0
         last_obs_hash = _observation_hash(observation)
         initial_observation = observation
         estimated_optimal_actions = _estimated_optimal_actions(initial_observation)
+        initial_resource_map = {r.get("id", ""): r for r in initial_observation.resources}
 
         for step_idx in range(1, MAX_STEPS + 1):
             steps_remaining = MAX_STEPS - step_idx + 1
@@ -839,6 +886,7 @@ def run_task(task_id: str) -> tuple[float, int]:
                     ],
                     steps_remaining=steps_remaining,
                     observation_diff=last_observation_diff,
+                    transfer_hint=transfer_hint,
                 )
                 raw_action, llm_ok, usage, raw_content = call_llm(
                     prompt_text,
@@ -922,6 +970,12 @@ def run_task(task_id: str) -> tuple[float, int]:
             last_obs_hash = new_obs_hash
 
             blocked_actions.add((action.action_type, action.resource_id, action.new_size, action.new_pricing))
+            if action.action_type in action_stats:
+                action_stats[action.action_type]["attempted"] += 1
+                if result.reward > 0:
+                    action_stats[action.action_type]["positive"] += 1
+                else:
+                    action_stats[action.action_type]["non_positive"] += 1
             step_history.append(
                 f"step={step_idx} action={action.action_type} target={action.resource_id or '-'} "
                 f"reward={result.reward:.4f} projected_if_skip={projected_if_skip:.4f} "
@@ -957,11 +1011,21 @@ def run_task(task_id: str) -> tuple[float, int]:
                 f"target={action.resource_id or '-'} reward={result.reward:.4f} done={result.done}",
                 flush=True,
             )
+            if EMIT_PROJECTED_LOGS:
+                print(
+                    f"[PROJECTED] task={task_id} step={step_idx} projected_score_if_skip={projected_if_skip:.4f}",
+                    flush=True,
+                )
             if result.done:
                 break
 
         score = compute_score(env.state())
         print(f"[END] task={task_id} score={score:.4f} steps={steps_executed}", flush=True)
+        print(
+            f"[STATS] task={task_id} terminate={action_stats['terminate']} resize={action_stats['resize']} "
+            f"switch_pricing={action_stats['switch_pricing']} skip={action_stats['skip']}",
+            flush=True,
+        )
         artifacts_dir = Path("artifacts")
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         _write_json_artifact(
@@ -997,6 +1061,19 @@ def run_task(task_id: str) -> tuple[float, int]:
             {"action_type": k[0], "resource_id": k[1], "new_size": k[2], "new_pricing": k[3]}
             for k in (optimal_keys - executed_keys)
         ]
+        missed_actions_with_estimate: list[dict[str, Any]] = []
+        missed_savings_estimate = 0.0
+        for a in missed_actions:
+            resource = initial_resource_map.get(a["resource_id"], {})
+            est = _expected_savings(a, resource) if resource else 0.0
+            missed_savings_estimate += est
+            missed_actions_with_estimate.append(
+                {
+                    **a,
+                    "estimated_savings": round(float(est), 4),
+                }
+            )
+
         _write_json_artifact(
             artifacts_dir / "optimal_diff" / f"{task_id}_{timestamp}.json",
             {
@@ -1004,13 +1081,23 @@ def run_task(task_id: str) -> tuple[float, int]:
                 "estimated_optimal_action_count": len(estimated_optimal_actions),
                 "executed_non_skip_action_count": len(executed_keys),
                 "missed_action_count": len(missed_actions),
-                "missed_actions": missed_actions[:100],
+                "missed_actions": missed_actions_with_estimate[:100],
                 "total_savings": float(env.state().total_savings),
                 "optimal_savings": float(env.state().optimal_savings),
                 "savings_gap": float(max(0.0, env.state().optimal_savings - env.state().total_savings)),
+                "missed_savings_estimate": round(float(missed_savings_estimate), 4),
             },
         )
-        return score, steps_executed
+
+        learning_bits: list[str] = []
+        for action_type in ["terminate", "resize", "switch_pricing"]:
+            stat = action_stats[action_type]
+            if stat["positive"] > 0:
+                learning_bits.append(f"{action_type}:useful({stat['positive']}/{stat['attempted']})")
+            elif stat["attempted"] > 0:
+                learning_bits.append(f"{action_type}:weak({stat['non_positive']}/{stat['attempted']})")
+        task_learning_hint = f"{task_id}=>" + (", ".join(learning_bits) if learning_bits else "no-strong-signal")
+        return score, steps_executed, task_learning_hint, action_stats
     finally:
         _close_env(ctx)
 
@@ -1020,10 +1107,15 @@ if __name__ == "__main__":
     print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
     per_task_steps: dict[str, int] = {}
+    per_task_action_stats: dict[str, dict[str, dict[str, int]]] = {}
+    transfer_hint = _build_transfer_hint()
     for task_id in ["easy", "medium", "hard"]:
-        score, steps = run_task(task_id)
+        score, steps, task_learning_hint, action_stats = run_task(task_id, transfer_hint=transfer_hint)
         scores[task_id] = score
         per_task_steps[task_id] = steps
+        per_task_action_stats[task_id] = action_stats
+        GLOBAL_TASK_LEARNINGS.append(task_learning_hint)
+        transfer_hint = _build_transfer_hint()
     print(
         f"[SUMMARY] easy={scores['easy']:.4f} medium={scores['medium']:.4f} hard={scores['hard']:.4f}",
         flush=True,
@@ -1034,6 +1126,7 @@ if __name__ == "__main__":
     report = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "model": MODEL_NAME,
+        "prompt_version": PROMPT_VERSION,
         "fallback_model_name": FALLBACK_MODEL_NAME,
         "model_fallbacks": MODEL_FALLBACKS,
         "api_base_url": API_BASE_URL,
@@ -1041,7 +1134,10 @@ if __name__ == "__main__":
         "scores": scores,
         "llm_usage": dict(LLM_METRICS),
         "llm_usage_by_model": dict(LLM_METRICS_BY_MODEL),
+        "llm_cost_usd_estimate": round(_estimated_llm_cost_usd(LLM_METRICS), 8),
         "steps": per_task_steps,
+        "action_stats": per_task_action_stats,
+        "task_learnings": list(GLOBAL_TASK_LEARNINGS),
     }
     (artifacts_dir / "benchmark_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"

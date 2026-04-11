@@ -213,12 +213,16 @@ score = agent_savings / optimal_savings
 | `API_KEY` | API key for the above endpoint (required) |
 | `SUBMISSION_MODE` | `1/true` enforces strict validator-safe env requirements (default enabled) |
 | `MODEL_NAME` | Model identifier (required) |
+| `PROMPT_VERSION` | Prompt file version from `prompts/<version>.txt` (default `v1`) |
 | `ENV_URL` | Server URL; defaults to `http://localhost:7860` (optional) |
 | `ENV_HEALTH_RETRIES` | Health probe retries before each task (optional, default `5`) |
 | `ENV_HEALTH_BACKOFF_SECONDS` | Exponential backoff base for health probe (optional, default `1.0`) |
 | `FALLBACK_MODEL_NAME` | Optional backup model for automatic fallback if primary model fails/parses badly |
 | `MODEL_FALLBACKS` | Optional comma-separated extra fallback models after `MODEL_NAME` and `FALLBACK_MODEL_NAME` |
 | `NOOP_STREAK_THRESHOLD` | Auto-skip after repeated unchanged observations (optional, default `3`) |
+| `EMIT_PROJECTED_LOGS` | Emit `[PROJECTED]` lines with projected score-if-skip each step (optional, default off) |
+| `PROMPT_COST_PER_1K_TOKENS` | Prompt token price for cost accounting (optional, default `0`) |
+| `COMPLETION_COST_PER_1K_TOKENS` | Completion token price for cost accounting (optional, default `0`) |
 
 Optional file-based config is also supported via `config.yaml` (see `config.yaml.example`).
 Environment variables always take precedence over config file values.
@@ -284,6 +288,8 @@ Includes:
 - task scores
 - token usage totals
 - model/base URL metadata
+- prompt version, per-model token usage, and estimated LLM cost (USD)
+- per-task action success stats and transfer-learning hints
 - per-step traces in `artifacts/traces/`
 - estimated-optimal diff reports in `artifacts/optimal_diff/`
 
