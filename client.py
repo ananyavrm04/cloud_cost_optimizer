@@ -120,17 +120,20 @@ class ReconnectingCloudCostEnv:
                 self._recover_and_replay()
         raise last_error
 
-    def reset(self, task_id: str):
+    def reset(self, task_id: str, seed: int | None = None):
         def call():
             self._task_id = task_id
             self._replay_actions = []
-            return self._env.reset(task_id=task_id)
+            kwargs = {"task_id": task_id}
+            if seed is not None:
+                kwargs["seed"] = seed
+            return self._env.reset(**kwargs)
 
         return self._with_retry(call)
 
-    def step(self, action: CloudCostAction):
+    def step(self, action: CloudCostAction, **kwargs):
         def call():
-            result = self._env.step(action)
+            result = self._env.step(action, **kwargs)
             self._replay_actions.append(action)
             return result
 

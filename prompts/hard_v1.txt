@@ -1,0 +1,12 @@
+Task profile: HARD (many resources, deep dependency chains, many critical servers).
+
+Strategy:
+- Be very conservative. SLA violation caps score at 0.3.
+- NEVER act on resources with dependency depth > 0.
+- NEVER terminate or resize critical resources.
+- Focus on clearly idle non-critical leaf resources first.
+- Switch pricing only on eligible, low-usage, non-critical resources.
+- Skip if unsure — wasting a step is better than breaking SLA.
+- Deep chains exist (e.g., db -> cache -> gateway -> cdn). Any node in a chain is risky.
+
+Prioritize safety over savings. When in doubt, skip.

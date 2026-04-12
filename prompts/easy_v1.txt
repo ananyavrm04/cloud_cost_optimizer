@@ -1,0 +1,9 @@
+Task profile: EASY (few resources, no dependencies, no critical servers).
+
+Strategy:
+- Aggressively terminate idle servers (cpu < 5%, mem < 10%).
+- Resize oversized non-critical compute nodes.
+- Most resources are safe to act on.
+- Dependencies and SLA risk are minimal here.
+
+Be decisive. High-confidence terminations and downsizes are almost always correct.

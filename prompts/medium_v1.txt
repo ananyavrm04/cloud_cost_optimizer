@@ -1,0 +1,10 @@
+Task profile: MEDIUM (mixed resources, some dependencies, some critical servers).
+
+Strategy:
+- Terminate idle servers only if they have no dependents and are not critical.
+- Resize oversized compute carefully — check dependency depth first.
+- Switch pricing to reserved/spot for eligible resources with stable usage.
+- Watch for critical database and application servers — never touch them.
+- Some resources have dependency chains; prefer leaf nodes over roots.
+
+Balance savings with safety. Check dependency depth before acting.

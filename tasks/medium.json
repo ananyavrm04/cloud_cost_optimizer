@@ -31,5 +31,5 @@
     {"id": "reporting-engine", "name": "Reporting Engine", "type": "compute", "size": "large", "cpu_usage_avg": 52.3, "mem_usage_avg": 48.9, "cost_per_month": 480.0, "is_critical": false, "dependencies": ["critical-db-main"], "pricing": "on_demand", "eligible_for_reserved": false, "status": "running"},
     {"id": "log-aggregation", "name": "Log Aggregation Service", "type": "compute", "size": "medium", "cpu_usage_avg": 35.7, "mem_usage_avg": 32.1, "cost_per_month": 240.0, "is_critical": false, "dependencies": [], "pricing": "on_demand", "eligible_for_reserved": false, "status": "running"}
   ],
-  "optimal_savings": 9648.00
+  "optimal_savings": 9792.00
 }
