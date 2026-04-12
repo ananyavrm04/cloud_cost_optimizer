@@ -18,6 +18,8 @@ artifacts/
 *.log
 Thumbs.db
 .DS_Store
+uv.lock
+generated_client.py
 opus antigravity/
 ENHANCEMENTS.md
 FUNCTIONALITIES.md

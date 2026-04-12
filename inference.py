@@ -103,6 +103,37 @@ ENSEMBLE_VOTES = int(_cfg("ENSEMBLE_VOTES", 1))
 ENSEMBLE_TEMPERATURE = float(_cfg("ENSEMBLE_TEMPERATURE", 0.1))
 WARM_START_STEPS = int(_cfg("WARM_START_STEPS", 0))
 PROMPT_MAX_CHARS = int(_cfg("PROMPT_MAX_CHARS", 12000))
+FORCE_LLM_EVERY_STEP = str(_cfg("FORCE_LLM_EVERY_STEP", "0")).lower() in {"1", "true", "yes"}
+STEP_TIMEOUT_SECONDS = float(_cfg("STEP_TIMEOUT_SECONDS", 30))
+CONFIDENCE_THRESHOLD = float(_cfg("CONFIDENCE_THRESHOLD", 0.4))
+TOP_K_RESOURCES = int(_cfg("TOP_K_RESOURCES", 20))
+COMBINED_IDLE_THRESHOLD = float(_cfg("COMBINED_IDLE_THRESHOLD", 0.92))
+# Enhancement #53: environment seeding for reproducibility.
+ENV_SEED = str(_cfg("ENV_SEED", "")).strip()
+# Enhancement #18: configurable SLA penalty cap (default preserves current 0.3 behavior).
+SLA_PENALTY_CAP = float(_cfg("SLA_PENALTY_CAP", 0.3))
+# Enhancement #86: virtual resource tags in prompt.
+ENABLE_RESOURCE_TAGS = str(_cfg("ENABLE_RESOURCE_TAGS", "0")).lower() in {"1", "true", "yes"}
+# Enhancement #2: budget-aware action policy.
+TOKEN_BUDGET_PER_TASK = int(_cfg("TOKEN_BUDGET_PER_TASK", 0))
+MIN_MARGINAL_GAIN = float(_cfg("MIN_MARGINAL_GAIN", 0.0))
+# Enhancement #52: periodic self-reflection prompt.
+SELF_REFLECT_EVERY_N = int(_cfg("SELF_REFLECT_EVERY_N", 0))
+# Enhancement #44: temperature annealing on stalled progress.
+ENABLE_TEMP_ANNEALING = str(_cfg("ENABLE_TEMP_ANNEALING", "0")).lower() in {"1", "true", "yes"}
+TEMP_ANNEALING_STEP_THRESHOLD = int(_cfg("TEMP_ANNEALING_STEP_THRESHOLD", 5))
+TEMP_ANNEALING_MAX = float(_cfg("TEMP_ANNEALING_MAX", 0.3))
+# Enhancement #88: reward normalization for internal tracking.
+NORMALIZE_REWARDS = str(_cfg("NORMALIZE_REWARDS", "0")).lower() in {"1", "true", "yes"}
+# Enhancement #33: agent-side undo for failed resizes.
+ENABLE_UNDO_RESIZE = str(_cfg("ENABLE_UNDO_RESIZE", "0")).lower() in {"1", "true", "yes"}
+# Enhancement #91: two-phase commit for risky actions.
+TWO_PHASE_RISK_THRESHOLD = float(_cfg("TWO_PHASE_RISK_THRESHOLD", 0))
+# Enhancement #31: progressive difficulty mode.
+PROGRESSIVE_MODE = str(_cfg("PROGRESSIVE_MODE", "0")).lower() in {"1", "true", "yes"}
+PROGRESSIVE_THRESHOLD = float(_cfg("PROGRESSIVE_THRESHOLD", 0.8))
+# Enhancement #92: curriculum learning with action pattern carryover.
+CURRICULUM_CARRY_PATTERNS = str(_cfg("CURRICULUM_CARRY_PATTERNS", "0")).lower() in {"1", "true", "yes"}
 
 llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
@@ -150,6 +181,22 @@ def _load_system_prompt() -> str:
 
 SYSTEM_PROMPT = _load_system_prompt()
 
+
+def _load_task_prompt(task_id: str) -> str:
+    """Enhancement #6: task-specific prompt overlay loaded from prompts/{task_id}_{version}.txt."""
+    task_path = Path("prompts") / f"{task_id}_{PROMPT_VERSION}.txt"
+    if task_path.exists():
+        text = task_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return ""
+
+
+def _combined_idle_score(cpu: float, mem: float) -> float:
+    """Enhancement #71/#64: weighted CPU+memory idle score. 1.0 = fully idle, 0.0 = fully busy."""
+    return 0.6 * (1.0 - cpu / 100.0) + 0.4 * (1.0 - mem / 100.0)
+
+
 VALID_ACTIONS = {"terminate", "resize", "switch_pricing", "skip"}
 SIZE_ORDER = ["small", "medium", "large", "xlarge"]
 VALID_PRICING = {"on_demand", "reserved", "spot"}
@@ -157,6 +204,37 @@ LLM_METRICS = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_to
 LLM_METRICS_BY_MODEL: dict[str, dict[str, int]] = {}
 PROMPT_RESPONSE_CACHE: dict[str, dict[str, Any]] = {}
 GLOBAL_TASK_LEARNINGS: list[str] = []
+# Enhancement #92: curriculum learning action pattern carryover.
+GLOBAL_ACTION_PATTERNS: list[dict] = []
+
+
+def _virtual_tags(resource: dict) -> str:
+    """Enhancement #86: generate virtual tags based on resource properties."""
+    tags = []
+    idle = _combined_idle_score(
+        float(resource.get("cpu_usage_avg", 50.0)),
+        float(resource.get("mem_usage_avg", 50.0)),
+    )
+    if idle >= 0.9:
+        tags.append("team:idle")
+    elif idle >= 0.7:
+        tags.append("team:underused")
+    else:
+        tags.append("team:active")
+    if resource.get("is_critical", False):
+        tags.append("env:production")
+    else:
+        tags.append("env:staging")
+    rtype = resource.get("type", "compute")
+    if rtype == "database":
+        tags.append("tier:data")
+    elif rtype == "storage":
+        tags.append("tier:storage")
+    else:
+        tags.append("tier:compute")
+    return " ".join(tags)
+
+
 ERROR_CODE_POLICY = {
     "ERR_RESOURCE_NOT_FOUND": {"block_action": True, "fallback_heuristic": True},
     "ERR_ALREADY_TERMINATED": {"block_action": True, "fallback_heuristic": True},
@@ -362,6 +440,8 @@ def build_user_prompt(
     steps_remaining: int,
     observation_diff: str,
     transfer_hint: str = "",
+    task_id: str = "",
+    intra_episode_lessons: str = "",
 ) -> str:
     running_resources = [r for r in observation.resources if r.get("status") == "running"]
     # Enhancement #50: prioritize high-cost resources first.
@@ -379,22 +459,44 @@ def build_user_prompt(
         f"{k}:{v:.2f}" for k, v in sorted(by_type.items(), key=lambda kv: kv[1], reverse=True)
     ) or "none"
 
+    # Enhancement #3: top-k resource filtering for LLM prompt.
+    prompt_resources = running_resources
+    if TOP_K_RESOURCES > 0 and len(running_resources) > TOP_K_RESOURCES:
+        prompt_resources = running_resources[:TOP_K_RESOURCES]
+        omitted = len(running_resources) - TOP_K_RESOURCES
+    else:
+        omitted = 0
+
     # Enhancement #46: compress prompt when resource count is large.
-    if len(running_resources) > 40:
-        resources = _compress_resources_for_prompt(running_resources, dependency_depth)
+    if len(prompt_resources) > 40:
+        resources = _compress_resources_for_prompt(prompt_resources, dependency_depth)
     else:
         resources = []
-        for r in running_resources:
+        for r in prompt_resources:
+            idle = _combined_idle_score(
+                float(r.get("cpu_usage_avg", 50.0)),
+                float(r.get("mem_usage_avg", 50.0)),
+            )
+            # Enhancement #86: virtual resource tags.
+            tag_str = f" tags=[{_virtual_tags(r)}]" if ENABLE_RESOURCE_TAGS else ""
             resources.append(
                 f"- id={r['id']} size={r['size']} cpu={r['cpu_usage_avg']:.1f} "
-                f"mem={r['mem_usage_avg']:.1f} cost={r['cost_per_month']:.2f} "
+                f"mem={r['mem_usage_avg']:.1f} idle_score={idle:.2f} cost={r['cost_per_month']:.2f} "
                 f"critical={r['is_critical']} deps={r['dependencies']} "
                 f"dep_depth={dependency_depth.get(r['id'], 0)} "
                 f"pricing={r['pricing']} eligible_reserved={r['eligible_for_reserved']}"
+                f" trend=stable{tag_str}"
             )
+    if omitted > 0:
+        resources.append(f"- ... ({omitted} lower-priority resources omitted)")
 
     history_block = "\n".join(step_history) if step_history else "(none)"
     transfer_block = transfer_hint if transfer_hint else "(none)"
+    # Enhancement #6: task-specific prompt overlay.
+    task_hint = _load_task_prompt(task_id) if task_id else ""
+    task_hint_block = f"Task strategy hint:\n{task_hint}\n" if task_hint else ""
+    # Enhancement #72: intra-episode lessons.
+    lesson_block = f"Episode lessons so far: {intra_episode_lessons}\n" if intra_episode_lessons else ""
     return (
         f"Current cost: {observation.current_monthly_cost:.2f}\n"
         f"Original cost: {observation.original_monthly_cost:.2f}\n"
@@ -407,8 +509,11 @@ def build_user_prompt(
         f"Feedback: {observation.step_feedback}\n"
         f"Observation diff: {observation_diff}\n"
         f"Transfer hint from previous tasks: {transfer_block}\n"
+        f"{task_hint_block}"
+        f"{lesson_block}"
         f"Recent history:\n{history_block}\n"
-        f"Running resources:\n" + "\n".join(resources)
+        f"Running resources:\n" + "\n".join(resources) + "\n"
+        f"Optionally include 'reasoning' (brief) and 'confidence' (0.0-1.0) in your JSON."
     )
 
 
@@ -434,21 +539,25 @@ def heuristic_action(observation, blocked_actions: set[tuple]) -> dict:
     original = max(float(observation.original_monthly_cost or 0.0), 1.0)
     current = float(observation.current_monthly_cost or 0.0)
     savings_ratio = max(0.0, min(1.0, (original - current) / original))
-    terminate_cpu_threshold = 5.0
+    # Enhancement #71/#64: combined idle threshold adapts with progress.
+    terminate_idle_threshold = COMBINED_IDLE_THRESHOLD
     resize_cpu_threshold = 35.0
     if savings_ratio < 0.20:
-        terminate_cpu_threshold = 8.0
+        terminate_idle_threshold = max(0.85, COMBINED_IDLE_THRESHOLD - 0.05)
         resize_cpu_threshold = 45.0
     elif savings_ratio < 0.35:
-        terminate_cpu_threshold = 6.5
+        terminate_idle_threshold = max(0.88, COMBINED_IDLE_THRESHOLD - 0.02)
         resize_cpu_threshold = 40.0
 
     # Candidate: terminate
     for r in running:
         candidate = ("terminate", r["id"], "", "")
+        idle = _combined_idle_score(
+            float(r.get("cpu_usage_avg", 100.0)),
+            float(r.get("mem_usage_avg", 100.0)),
+        )
         if (
-            r.get("cpu_usage_avg", 100.0) < terminate_cpu_threshold
-            and r.get("mem_usage_avg", 100.0) < 10.0
+            idle >= terminate_idle_threshold
             and not r.get("is_critical", True)
             and dependency_depth.get(r["id"], 0) == 0
             and candidate not in blocked_actions
@@ -635,7 +744,7 @@ def _llm_request(messages: list[dict], model_name: str, temperature: float = 0.0
     return parsed, usage_dict, raw
 
 
-def call_llm(user_prompt: str, message_history: list[dict]) -> tuple[dict, bool, dict, str]:
+def call_llm(user_prompt: str, message_history: list[dict], base_temperature: float = 0.0) -> tuple[dict, bool, dict, str]:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         *message_history,
@@ -655,7 +764,7 @@ def call_llm(user_prompt: str, message_history: list[dict]) -> tuple[dict, bool,
         votes = max(1, ENSEMBLE_VOTES)
         for vote_idx in range(votes):
             for attempt in range(max(1, LLM_MAX_RETRIES)):
-                temp = 0.0 if votes == 1 else max(0.0, ENSEMBLE_TEMPERATURE)
+                temp = base_temperature if votes == 1 else max(base_temperature, ENSEMBLE_TEMPERATURE)
                 try:
                     parsed, usage, raw = _llm_request(messages, model_name=model_name, temperature=temp)
                     for k in usage_total:
@@ -712,7 +821,7 @@ def compute_score(state) -> float:
     score = state.total_savings / state.optimal_savings
     score = max(eps, min(1.0 - eps, score))
     if state.sla_violated:
-        score = min(score, 0.3)
+        score = min(score, SLA_PENALTY_CAP)
     return max(eps, min(1.0 - eps, score))
 
 
@@ -899,9 +1008,29 @@ def _estimated_llm_cost_usd(metrics: dict[str, int]) -> float:
 
 def _build_transfer_hint() -> str:
     # Enhancement #89: transfer learning hints across tasks.
-    if not GLOBAL_TASK_LEARNINGS:
-        return ""
-    return " | ".join(GLOBAL_TASK_LEARNINGS[-6:])
+    hints: list[str] = []
+    if GLOBAL_TASK_LEARNINGS:
+        hints.append(" | ".join(GLOBAL_TASK_LEARNINGS[-6:]))
+    # Enhancement #92: curriculum learning — summarize successful action patterns.
+    if CURRICULUM_CARRY_PATTERNS and GLOBAL_ACTION_PATTERNS:
+        pattern_summary: dict[str, dict] = {}
+        for p in GLOBAL_ACTION_PATTERNS[-20:]:
+            key = f"{p['action_type']}_{p['resource_type']}"
+            if key not in pattern_summary:
+                pattern_summary[key] = {"count": 0, "total_reward": 0.0}
+            pattern_summary[key]["count"] += 1
+            pattern_summary[key]["total_reward"] += p["reward"]
+        top = sorted(
+            pattern_summary.items(),
+            key=lambda x: x[1]["total_reward"] / max(1, x[1]["count"]),
+            reverse=True,
+        )[:5]
+        pstr = "; ".join(
+            f"{k}: {v['count']}x avg={v['total_reward'] / max(1, v['count']):.3f}"
+            for k, v in top
+        )
+        hints.append(f"Successful patterns: {pstr}")
+    return " | ".join(hints) if hints else ""
 
 
 def _observation_hash(observation) -> str:
@@ -986,7 +1115,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
     try:
         reset_result, ctx, env = _run_with_reconnect(
             "reset",
-            lambda e: e.reset(task_id=task_id),
+            lambda e: e.reset(task_id=task_id, seed=int(ENV_SEED) if ENV_SEED else None),
             task_id=task_id,
             env_ctx=ctx,
             env_obj=env,
@@ -997,6 +1126,20 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             if hasattr(reset_result, "observation")
             else reset_result
         )
+
+        # Enhancement #15: auto-scale step budget based on resource count.
+        resource_count = len([r for r in observation.resources if r.get("status") == "running"])
+        task_max_steps = min(MAX_STEPS, max(10, int(resource_count * COMBINED_IDLE_THRESHOLD * 3)))
+
+        # Enhancement #35: log dependency graph at episode start.
+        initial_running = [r for r in observation.resources if r.get("status") == "running"]
+        dep_graph = _build_dependents_graph(initial_running)
+        chains = [(rid, children) for rid, children in dep_graph.items() if children]
+        if chains:
+            chain_summary = "; ".join(f"{rid}->[{','.join(ch)}]" for rid, ch in chains[:10])
+            print(f"[DEPGRAPH] task={task_id} chains={len(chains)} sample={chain_summary}", flush=True)
+        else:
+            print(f"[DEPGRAPH] task={task_id} chains=0 (no dependencies)", flush=True)
 
         steps_executed = 0
         step_history: deque[str] = deque(maxlen=max(1, HISTORY_WINDOW))
@@ -1025,9 +1168,22 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
         warm_start_plan = _build_warm_start_plan(observation)
         explored_actions: set[tuple] = set()
         max_possible_actions = _count_possible_actions(observation)
+        # Enhancement #72: intra-episode lesson tracking.
+        intra_positive: dict[str, int] = {"terminate": 0, "resize": 0, "switch_pricing": 0}
+        intra_attempted: dict[str, int] = {"terminate": 0, "resize": 0, "switch_pricing": 0}
+        # Enhancement #2: budget-aware action policy.
+        task_tokens_used = 0
+        recent_rewards: list[float] = []
+        # Enhancement #33: undo tracking.
+        last_resize_original: dict | None = None
+        # Enhancement #44: temperature annealing.
+        no_progress_steps = 0
 
-        for step_idx in range(1, MAX_STEPS + 1):
-            steps_remaining = MAX_STEPS - step_idx + 1
+        for step_idx in range(1, task_max_steps + 1):
+            steps_remaining = task_max_steps - step_idx + 1
+            llm_reasoning = ""
+            llm_confidence = 1.0
+            force_llm_step = FORCE_LLM_EVERY_STEP and not llm_unavailable
             max_possible_actions = max(max_possible_actions, _count_possible_actions(observation))
             state_snapshot, ctx, env = _run_with_reconnect(
                 "state",
@@ -1049,22 +1205,60 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 action_data = _empty_action()
             else:
                 action_data = None
+            # Enhancement #33: attempt undo of failed resize before normal decision.
+            if (
+                ENABLE_UNDO_RESIZE
+                and action_data is None
+                and last_resize_original is not None
+            ):
+                undo_action = {
+                    "action_type": "resize",
+                    "resource_id": last_resize_original["resource_id"],
+                    "new_size": last_resize_original["original_size"],
+                    "new_pricing": "",
+                }
+                undo_key = _action_key(undo_action)
+                if undo_key not in blocked_actions:
+                    action_data = undo_action
+                last_resize_original = None
+
             if state_snapshot.sla_violated:
                 sla_damaged = True
 
             # Enhancement #63: once SLA is violated, switch to damage-control.
+            # In FORCE_LLM_EVERY_STEP mode we bypass early short-circuit guards
+            # so each step still attempts an LLM decision path.
             if action_data is not None:
                 pass
-            elif step_idx <= max(0, WARM_START_STEPS) and step_idx <= len(warm_start_plan):
+            elif (not force_llm_step) and step_idx <= max(0, WARM_START_STEPS) and step_idx <= len(warm_start_plan):
                 seeded = warm_start_plan[step_idx - 1]
                 action_data = normalize_action(seeded, observation, blocked_actions)
-            elif sla_damaged or observation.current_uptime < observation.sla_target:
+            elif (not force_llm_step) and (sla_damaged or observation.current_uptime < observation.sla_target):
                 action_data = _empty_action()
-            elif consecutive_negative >= NEGATIVE_STREAK_THRESHOLD:
+            elif (not force_llm_step) and consecutive_negative >= NEGATIVE_STREAK_THRESHOLD:
                 action_data = _empty_action()
             elif llm_unavailable:
                 action_data = heuristic_action(observation, blocked_actions)
             else:
+                # Enhancement #72: build intra-episode lesson string.
+                intra_bits = []
+                for at in ["terminate", "resize", "switch_pricing"]:
+                    if intra_attempted[at] > 0:
+                        intra_bits.append(f"{at}:{intra_positive[at]}/{intra_attempted[at]}ok")
+                intra_lesson_str = ", ".join(intra_bits) if intra_bits else ""
+
+                # Enhancement #52: self-reflection injection.
+                reflection_prefix = ""
+                if (
+                    SELF_REFLECT_EVERY_N > 0
+                    and step_idx > 1
+                    and (step_idx - 1) % SELF_REFLECT_EVERY_N == 0
+                ):
+                    reflection_prefix = (
+                        "[SELF-REFLECT] Pause and reconsider: Are you pursuing the highest-value "
+                        "remaining actions? Review action stats and adjust strategy.\n"
+                    )
+
                 prompt_text = build_user_prompt(
                     observation=observation,
                     step_history=list(step_history)
@@ -1078,11 +1272,21 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                     steps_remaining=steps_remaining,
                     observation_diff=last_observation_diff,
                     transfer_hint=transfer_hint,
+                    task_id=task_id,
+                    intra_episode_lessons=intra_lesson_str,
                 )
+                if reflection_prefix:
+                    prompt_text = reflection_prefix + prompt_text
                 prompt_text = _enforce_prompt_budget(prompt_text)
+                # Enhancement #44: temperature annealing.
+                dynamic_temp = 0.0
+                if ENABLE_TEMP_ANNEALING and no_progress_steps >= TEMP_ANNEALING_STEP_THRESHOLD:
+                    factor = min(1.0, (no_progress_steps - TEMP_ANNEALING_STEP_THRESHOLD) / max(1, TEMP_ANNEALING_STEP_THRESHOLD))
+                    dynamic_temp = min(TEMP_ANNEALING_MAX, factor * TEMP_ANNEALING_MAX)
                 raw_action, llm_ok, usage, raw_content = call_llm(
                     prompt_text,
                     list(llm_message_history),
+                    base_temperature=dynamic_temp,
                 )
                 if raw_content:
                     llm_message_history.append({"role": "user", "content": prompt_text})
@@ -1093,18 +1297,62 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                         f"completion={usage['completion_tokens']} total={usage['total_tokens']}",
                         flush=True,
                     )
+                # Enhancement #43: extract chain-of-thought reasoning.
+                llm_reasoning = str(raw_action.get("reasoning", "")) if isinstance(raw_action, dict) else ""
+                # Enhancement #5: confidence gating.
+                llm_confidence = 1.0
+                if isinstance(raw_action, dict) and "confidence" in raw_action:
+                    try:
+                        llm_confidence = float(raw_action["confidence"])
+                    except (ValueError, TypeError):
+                        llm_confidence = 1.0
+
+                # Enhancement #2: token budget tracking.
+                task_tokens_used += usage.get("total_tokens", 0)
+                if TOKEN_BUDGET_PER_TASK > 0 and task_tokens_used >= TOKEN_BUDGET_PER_TASK:
+                    llm_unavailable = True
+
                 if llm_ok:
                     consecutive_llm_failures = 0
-                    action_data = normalize_action(raw_action, observation, blocked_actions)
+                    if llm_confidence < CONFIDENCE_THRESHOLD:
+                        action_data = heuristic_action(observation, blocked_actions)
+                        llm_reasoning = f"[low-confidence={llm_confidence:.2f}, fell back to heuristic] {llm_reasoning}"
+                    else:
+                        action_data = normalize_action(raw_action, observation, blocked_actions)
                 else:
                     consecutive_llm_failures += 1
-                    if consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
+                    if (not FORCE_LLM_EVERY_STEP) and consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
                         llm_unavailable = True
                     action_data = heuristic_action(observation, blocked_actions)
 
             action_data = _confirm_action(action_data, task_id=task_id, step_idx=step_idx)
             if action_data.get("action_type") == "__heuristic__":
                 action_data = heuristic_action(observation, blocked_actions)
+
+            # Enhancement #91: two-phase commit for high-risk actions.
+            if (
+                TWO_PHASE_RISK_THRESHOLD > 0
+                and action_data.get("action_type", "skip") != "skip"
+                and not llm_unavailable
+            ):
+                _res_map_2p = {r.get("id"): r for r in observation.resources if r.get("status") == "running"}
+                _target_2p = _res_map_2p.get(action_data.get("resource_id", ""))
+                if _target_2p:
+                    _dd_2p = _dependency_depths(list(_res_map_2p.values()))
+                    _risk_2p = _action_risk_score(
+                        action_data, _target_2p,
+                        _dd_2p.get(action_data["resource_id"], 0),
+                        observation.current_uptime - observation.sla_target,
+                    )
+                    if _risk_2p >= TWO_PHASE_RISK_THRESHOLD:
+                        _confirm_prompt = (
+                            f"You proposed: {json.dumps(action_data)}. "
+                            f"Risk score: {_risk_2p:.2f} (threshold: {TWO_PHASE_RISK_THRESHOLD}). "
+                            f"Confirm by returning the same JSON, or skip to abort."
+                        )
+                        _confirm_result, _confirm_ok, _, _ = call_llm(_confirm_prompt, list(llm_message_history))
+                        if not _confirm_ok or _action_key(_confirm_result) != _action_key(action_data):
+                            action_data = _empty_action()
 
             action = CloudCostAction(
                 action_type=action_data.get("action_type", "skip"),
@@ -1148,7 +1396,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
 
             result, ctx, env = _run_with_reconnect(
                 "step",
-                lambda e: e.step(action),
+                lambda e: e.step(action, timeout_s=STEP_TIMEOUT_SECONDS),
                 task_id=task_id,
                 env_ctx=ctx,
                 env_obj=env,
@@ -1179,6 +1427,39 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 f"feedback={observation.step_feedback}"
             )
 
+            # Enhancement #44: track no-progress steps for annealing.
+            if result.reward <= 0:
+                no_progress_steps += 1
+            else:
+                no_progress_steps = 0
+
+            # Enhancement #33: record failed resize for potential undo.
+            if (
+                ENABLE_UNDO_RESIZE
+                and result.reward < 0
+                and action.action_type == "resize"
+                and action.resource_id
+            ):
+                orig_r = initial_resource_map.get(action.resource_id, {})
+                orig_size = orig_r.get("size", "")
+                if orig_size and orig_size != action.new_size:
+                    last_resize_original = {"resource_id": action.resource_id, "original_size": orig_size}
+
+            # Enhancement #88: normalized reward for internal tracking.
+            internal_reward = result.reward
+            if NORMALIZE_REWARDS and resource_count > 0:
+                internal_reward = result.reward / resource_count
+
+            # Enhancement #2: marginal gain tracking.
+            if result.reward >= 0:
+                recent_rewards.append(internal_reward)
+            if (
+                MIN_MARGINAL_GAIN > 0
+                and len(recent_rewards) >= 3
+                and sum(recent_rewards[-3:]) / 3.0 < MIN_MARGINAL_GAIN
+            ):
+                break
+
             if result.reward < 0:
                 consecutive_negative += 1
                 last_failed_action_key = current_action_key
@@ -1196,7 +1477,7 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                     blocked_actions.add(current_action_key)
                 if policy.get("increment_llm_failures"):
                     consecutive_llm_failures += 1
-                    if consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
+                    if (not FORCE_LLM_EVERY_STEP) and consecutive_llm_failures >= LLM_FAILURE_THRESHOLD:
                         llm_unavailable = True
             trace_rows.append(
                 {
@@ -1217,11 +1498,24 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
                 }
             )
 
+            # Enhancement #72: update intra-episode lesson counters.
+            if action.action_type in intra_attempted:
+                intra_attempted[action.action_type] += 1
+                if result.reward > 0:
+                    intra_positive[action.action_type] += 1
+
             print(
                 f"[STEP] task={task_id} step={step_idx} action={action.action_type} "
                 f"target={action.resource_id or '-'} reward={result.reward:.4f} done={result.done}",
                 flush=True,
             )
+            # Enhancement #56: action explanation logging.
+            if llm_reasoning:
+                print(
+                    f"[REASON] task={task_id} step={step_idx} confidence={llm_confidence:.2f} "
+                    f"reason={llm_reasoning[:200]}",
+                    flush=True,
+                )
             if EMIT_PROJECTED_LOGS:
                 print(
                     f"[PROJECTED] task={task_id} step={step_idx} projected_score_if_skip={projected_if_skip:.4f}",
@@ -1326,6 +1620,18 @@ def run_task(task_id: str, transfer_hint: str = "") -> tuple[float, int, str, di
             elif stat["attempted"] > 0:
                 learning_bits.append(f"{action_type}:weak({stat['non_positive']}/{stat['attempted']})")
         task_learning_hint = f"{task_id}=>" + (", ".join(learning_bits) if learning_bits else "no-strong-signal")
+
+        # Enhancement #92: collect successful action patterns for curriculum carryover.
+        if CURRICULUM_CARRY_PATTERNS:
+            for row in trace_rows:
+                if row["reward"] > 0 and row["action"]["action_type"] != "skip":
+                    GLOBAL_ACTION_PATTERNS.append({
+                        "action_type": row["action"]["action_type"],
+                        "reward": row["reward"],
+                        "resource_type": initial_resource_map.get(row["action"]["resource_id"], {}).get("type", ""),
+                        "was_critical": initial_resource_map.get(row["action"]["resource_id"], {}).get("is_critical", False),
+                    })
+
         return score, steps_executed, task_learning_hint, action_stats, coverage_info
     finally:
         _close_env(ctx)
@@ -1338,14 +1644,15 @@ if __name__ == "__main__":
     if args.interactive:
         globals()["INTERACTIVE_MODE"] = True
 
-    mode = "llm-required"
+    mode = "llm-required+force-llm" if FORCE_LLM_EVERY_STEP else "llm-required"
     print(f"[INFO] mode={mode}", flush=True)
     scores: dict[str, float] = {}
     per_task_steps: dict[str, int] = {}
     per_task_action_stats: dict[str, dict[str, dict[str, int]]] = {}
     per_task_coverage: dict[str, dict[str, float]] = {}
     transfer_hint = _build_transfer_hint()
-    for task_id in ["easy", "medium", "hard"]:
+    task_order = ["easy", "medium", "hard"]
+    for i, task_id in enumerate(task_order):
         score, steps, task_learning_hint, action_stats, coverage_info = run_task(task_id, transfer_hint=transfer_hint)
         scores[task_id] = score
         per_task_steps[task_id] = steps
@@ -1353,6 +1660,18 @@ if __name__ == "__main__":
         per_task_coverage[task_id] = coverage_info
         GLOBAL_TASK_LEARNINGS.append(task_learning_hint)
         transfer_hint = _build_transfer_hint()
+        # Enhancement #31: progressive difficulty — stop if score below threshold.
+        if PROGRESSIVE_MODE and score < PROGRESSIVE_THRESHOLD and i < len(task_order) - 1:
+            print(
+                f"[PROGRESSIVE] score={score:.4f} < threshold={PROGRESSIVE_THRESHOLD}, stopping progression",
+                flush=True,
+            )
+            for remaining_id in task_order[i + 1:]:
+                scores[remaining_id] = 0.001
+                per_task_steps[remaining_id] = 0
+                per_task_action_stats[remaining_id] = {}
+                per_task_coverage[remaining_id] = {}
+            break
     print(
         f"[SUMMARY] easy={scores['easy']:.4f} medium={scores['medium']:.4f} hard={scores['hard']:.4f}",
         flush=True,
@@ -1368,6 +1687,8 @@ if __name__ == "__main__":
         "model_fallbacks": MODEL_FALLBACKS,
         "api_base_url": API_BASE_URL,
         "submission_mode": SUBMISSION_MODE,
+        "force_llm_every_step": FORCE_LLM_EVERY_STEP,
+        "step_timeout_seconds": STEP_TIMEOUT_SECONDS,
         "scores": scores,
         "llm_usage": dict(LLM_METRICS),
         "llm_usage_by_model": dict(LLM_METRICS_BY_MODEL),

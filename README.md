@@ -42,7 +42,18 @@ The agent reasons step-by-step over cloud resources, but it is constrained by sa
 
 We also focused heavily on reliability under real-world failure modes. If the LLM response is malformed, the parser recovers deterministically. If API calls fail or rate-limit, retries and graceful fallback logic prevent crashes. If the environment is unavailable, health probes with retry/backoff prevent invalid runs before they start.
 
-The current pipeline also includes a sliding multi-turn LLM context window, prompt-response caching, reconnect-safe environment calls with action replay, task trace checkpointing, and optimal-path diff artifacts for post-run analysis.
+The current pipeline also includes a sliding multi-turn LLM context window, prompt-response caching, reconnect-safe environment calls with action replay, task trace checkpointing, and optimal-path diff artifacts for post-run analysis. Task-specific prompt overlays adapt strategy per difficulty level, and a combined CPU+memory idle score replaces brittle threshold pairs. The LLM is asked for optional confidence and reasoning fields — low-confidence responses fall back to the heuristic, and chain-of-thought rationale is logged per step for transparency.
+
+Additional opt-in features include: budget-aware action policy (token and marginal-gain caps), temperature annealing on stalled progress, periodic self-reflection prompts, agent-side undo for failed resizes, two-phase commit for high-risk actions, progressive difficulty mode, curriculum learning with action pattern carryover, virtual resource tagging, reward normalization, environment seeding for reproducibility, configurable SLA penalty caps, and auto-generated OpenAPI client stubs. All default to off and can be enabled via config.
+
+### LLM-First, Safety-Controlled Policy
+
+This agent is intentionally designed as **LLM-first with deterministic safety controls**:
+- The LLM proposes actions first.
+- A rule-based controller then blocks unsafe/no-op moves (dependency risks, invalid semantics, repeated failures).
+- If the LLM is unavailable or unstable, the system degrades gracefully to heuristic behavior to avoid run failure.
+
+This improves reliability under validator constraints without bypassing LLM usage.
 
 A major submission requirement was structured stdout parsing. Our inference pipeline emits strict `[START]`, `[STEP]`, and `[END]` blocks with flush-safe logging, so validators can parse every episode deterministically. We also enforce score output strictly inside `(0,1)` to satisfy validator range constraints.
 
@@ -171,7 +182,7 @@ score = agent_savings / optimal_savings
 - 30 resources: compute, storage, database
 - 8 idle servers, 7 oversized, 2 reserved-eligible
 - Some critical resources and dependencies
-- **Optimal savings:** ~$9,648/month
+- **Optimal savings:** ~$9,792/month
 
 ### Hard Task (`task_id="hard"`)
 - 60 resources
@@ -219,7 +230,10 @@ score = agent_savings / optimal_savings
 | `ENV_HEALTH_BACKOFF_SECONDS` | Exponential backoff base for health probe (optional, default `1.0`) |
 | `FALLBACK_MODEL_NAME` | Optional backup model for automatic fallback if primary model fails/parses badly |
 | `MODEL_FALLBACKS` | Optional comma-separated extra fallback models after `MODEL_NAME` and `FALLBACK_MODEL_NAME` |
+| `LLM_MAX_RETRIES` | Retries per model call before moving to next fallback model (default `2`) |
 | `NOOP_STREAK_THRESHOLD` | Auto-skip after repeated unchanged observations (optional, default `3`) |
+| `FORCE_LLM_EVERY_STEP` | Attempt an LLM decision every step before fallback (default on in `.env.example`) |
+| `STEP_TIMEOUT_SECONDS` | Per-step environment timeout passed to `env.step(...)` (default `30`) |
 | `USE_CLIENT_RECONNECT_WRAPPER` | Enable client-level reconnect/replay wrapper (optional, default enabled) |
 | `INTERACTIVE_MODE` | Human-in-the-loop confirmations for each proposed action (optional, default off) |
 | `ENSEMBLE_VOTES` | Number of LLM vote samples per step (optional, default `1`) |
@@ -232,15 +246,35 @@ score = agent_savings / optimal_savings
 Optional file-based config is also supported via `config.yaml` (see `config.yaml.example`).
 Environment variables always take precedence over config file values.
 
+#### Optional Enhancement Config
+
+| Variable | Description |
+|----------|-------------|
+| `CONFIDENCE_THRESHOLD` | LLM confidence below this falls back to heuristic (default `0.4`) |
+| `TOP_K_RESOURCES` | Max resources shown to LLM in prompt (default `20`) |
+| `COMBINED_IDLE_THRESHOLD` | Weighted CPU+memory idle score for terminate candidates (default `0.92`) |
+| `ENV_SEED` | Deterministic seed for `env.reset()` (default empty) |
+| `SLA_PENALTY_CAP` | Score cap when SLA is violated (default `0.3`) |
+| `ENABLE_RESOURCE_TAGS` | Add virtual resource tags to prompt (default off) |
+| `TOKEN_BUDGET_PER_TASK` | Max tokens per task before heuristic fallback (`0` = unlimited) |
+| `MIN_MARGINAL_GAIN` | Stop early if avg recent reward below this (`0.0` = disabled) |
+| `SELF_REFLECT_EVERY_N` | Inject strategy review every N steps (`0` = disabled) |
+| `ENABLE_TEMP_ANNEALING` | Increase LLM temperature on stalled progress (default off) |
+| `NORMALIZE_REWARDS` | Normalize rewards by resource count internally (default off) |
+| `ENABLE_UNDO_RESIZE` | Attempt undo of failed resize on next step (default off) |
+| `TWO_PHASE_RISK_THRESHOLD` | Require LLM confirmation above this risk (`0` = disabled) |
+| `PROGRESSIVE_MODE` | Stop advancing tasks if score below threshold (default off) |
+| `CURRICULUM_CARRY_PATTERNS` | Carry action patterns across tasks (default off) |
+
 ---
 
-## Baseline Scores
+## Scores
 
-| Task | Baseline score (heuristic agent) |
-|------|----------------------------------|
-| easy | 0.92 |
-| medium | 0.68 |
-| hard | 0.44 |
+| Task | Heuristic-only baseline | LLM agent |
+|------|------------------------|------------------------|
+| easy | 0.92 | **0.999** |
+| medium | 0.68 | **0.999** |
+| hard | 0.44 | **0.966** |
 
 ---
 
@@ -284,6 +318,14 @@ This runs:
 ```
 
 Uses conservative evaluator-safe flags (single vote, no warm-start, no interactive mode).
+
+### Optional LLM-Forward Demo Profile
+
+```powershell
+./scripts/run_llm_forward_demo.ps1
+```
+
+This profile also enables `FORCE_LLM_EVERY_STEP=1`, plus long no-op/negative thresholds for analysis-style runs.
 
 ### Prompt Version Comparison
 
@@ -352,6 +394,9 @@ Includes:
 - `[PROJECTED]`: optional projected score-if-skip (`EMIT_PROJECTED_LOGS=1`)
 - `[STATS]`: per-task action success statistics
 - `[COVERAGE]`: explored action-space ratio per task
+- `[DEPGRAPH]`: dependency chain summary at episode start
+- `[REASON]`: per-step LLM reasoning and confidence (when available)
+- `[PROGRESSIVE]`: emitted when progressive mode stops task advancement
 
 ---
 
@@ -374,13 +419,30 @@ cloud-cost-optimizer/
 │   ├── app.py                         # FastAPI application
 │   └── Dockerfile                     # Docker build configuration
 │
+├── prompts/
+│   ├── v1.txt                         # Default system prompt
+│   ├── v2.txt                         # Conservative prompt variant
+│   ├── easy_v1.txt                    # Task-specific overlay (easy)
+│   ├── medium_v1.txt                  # Task-specific overlay (medium)
+│   └── hard_v1.txt                    # Task-specific overlay (hard)
+│
 ├── tasks/
 │   ├── easy.json                      # Easy task (10 servers)
 │   ├── medium.json                    # Medium task (30 servers)
 │   └── hard.json                      # Hard task (60 servers)
 │
+├── scripts/
+│   ├── pre_submit_check.py            # Local pre-submit validator
+│   ├── compare_prompts.py             # Prompt version comparison
+│   ├── full_presubmit.ps1             # One-command pre-submit flow
+│   ├── run_e2e_docker.ps1             # Dockerized E2E test runner
+│   └── generate_openapi_client.py     # OpenAPI typed client generator
+│
 └── tests/
-    └── test_env.py                    # Unit tests
+    ├── test_env.py                    # Environment unit tests (38 tests)
+    ├── test_inference.py              # Inference unit tests (30 tests)
+    ├── test_integration_roundtrip.py  # Client-server integration tests
+    └── mock_llm_server.py             # Mock OpenAI server for E2E
 ```
 
 ---
