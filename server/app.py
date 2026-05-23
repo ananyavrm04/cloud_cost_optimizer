@@ -26,6 +26,12 @@ app = create_app(
     max_concurrent_envs=1,
 )
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+_FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+if _FRONTEND.exists():
+    app.mount("/ui", StaticFiles(directory=str(_FRONTEND), html=True), name="ui")
 
 @app.get("/")
 def health() -> dict:
