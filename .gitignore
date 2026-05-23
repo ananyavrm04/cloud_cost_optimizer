@@ -31,3 +31,6 @@ FUNCTIONALITIES.md
 .venv/
 venv/
 *.egg-info/
+
+# Training run artifacts (data, not code)
+training_runs/

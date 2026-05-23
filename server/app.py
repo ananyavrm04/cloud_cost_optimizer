@@ -66,6 +66,43 @@ async def agent_decide_endpoint(req: DecideRequest) -> DecideResponse:
     return await _agent_decide(req)
 
 
+# ── training dashboard endpoints ──
+try:
+    from .trainer import (
+        StartTrainingRequest, StartTrainingResponse, RunSummary,
+        start_training, get_run_summary, list_runs, get_run_episodes,
+    )
+except ImportError:
+    from server.trainer import (
+        StartTrainingRequest, StartTrainingResponse, RunSummary,
+        start_training, get_run_summary, list_runs, get_run_episodes,
+    )
+
+
+@app.post("/training/start", response_model=StartTrainingResponse)
+async def training_start_endpoint(req: StartTrainingRequest) -> StartTrainingResponse:
+    return await start_training(req)
+
+
+@app.get("/training/runs")
+def training_list_runs_endpoint() -> list[RunSummary]:
+    return list_runs()
+
+
+@app.get("/training/runs/{run_id}")
+def training_run_summary_endpoint(run_id: str):
+    summary = get_run_summary(run_id)
+    if summary is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+    return summary
+
+
+@app.get("/training/runs/{run_id}/episodes")
+def training_run_episodes_endpoint(run_id: str) -> list[dict]:
+    return get_run_episodes(run_id)
+
+
 def main() -> None:
     import uvicorn
     uvicorn.run("server.app:app", host="0.0.0.0", port=7860)

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Training Dashboard — Cloud Cost Optimizer</title>
+<link rel="icon" type="image/png" href="./favicon.png" />
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root {
+  --bg: #050509; --panel: #0c0c16; --line: rgba(255,255,255,0.06);
+  --line-2: rgba(255,255,255,0.10);
+  --text: #e6e6f0; --text-2: #a0a0b3; --text-3: #6b6b80;
+  --blue: #3b82f6; --cyan: #22d3ee; --purple: #a855f7;
+  --green: #22c55e; --red: #ef4444; --yellow: #facc15;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+  font-family: 'Manrope', system-ui, sans-serif; min-height: 100vh; }
+a { color: inherit; text-decoration: none; }
+button { font-family: inherit; cursor: pointer; }
+
+.nav { display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 24px; border-bottom: 1px solid var(--line);
+  background: rgba(5,5,9,0.7); backdrop-filter: blur(18px) saturate(1.2);
+  position: sticky; top: 0; z-index: 10; }
+.nav .brand img { height: 36px; display: block; }
+.nav a.back { color: var(--text-2); font-size: 14px; }
+.nav a.back:hover { color: var(--text); }
+
+.wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+
+.page-head { padding: 50px 0 36px; text-align: center; }
+.page-head h1 { margin: 0; font-size: 46px; font-weight: 800; letter-spacing: -0.03em;
+  background: linear-gradient(92deg, #60a5fa, #a855f7); -webkit-background-clip: text;
+  background-clip: text; color: transparent; }
+.page-head p { color: var(--text-2); margin: 10px 0 0; font-size: 16px; }
+
+.grid-2 { display: grid; grid-template-columns: 380px 1fr; gap: 22px; margin-bottom: 32px; }
+@media (max-width: 1000px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.card { background: linear-gradient(180deg, #0c0c16, #08080f); border: 1px solid var(--line);
+  border-radius: 16px; padding: 24px; }
+.card h2 { margin: 0 0 18px; font-size: 18px; font-weight: 700; display: flex;
+  align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 13px; color: var(--text-2); margin-bottom: 6px; }
+.field input[type="number"], .field input[type="text"] { width: 100%; padding: 11px 14px;
+  background: rgba(255,255,255,0.03); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--text); font-family: inherit; font-size: 14px; }
+.field input:focus { outline: none; border-color: rgba(168,85,247,0.5); }
+.toggle { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; padding: 12px 14px;
+  background: rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.18); border-radius: 10px;
+  transition: border-color .15s ease, background .15s ease; }
+.toggle:hover { border-color: rgba(168,85,247,0.35); background: rgba(168,85,247,0.07); }
+.toggle input { width: 16px; height: 16px; accent-color: #a855f7; margin-top: 2px; }
+.toggle-text { font-size: 14px; line-height: 1.4; }
+.toggle-text small { color: var(--text-3); display: block; margin-top: 4px; font-size: 12px; }
+
+.btn-primary { padding: 13px 22px; background: linear-gradient(120deg, #6366f1, #a855f7);
+  color: white; border: 0; border-radius: 10px; font-weight: 600; font-size: 14px;
+  width: 100%; transition: transform .15s ease, box-shadow .15s ease; }
+.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 32px -10px rgba(168,85,247,0.6); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.runs-list { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow-y: auto; }
+.run-item { padding: 14px 16px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);
+  border-radius: 10px; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.run-item:hover { border-color: rgba(168,85,247,0.4); }
+.run-item.selected { border-color: #a855f7; background: rgba(168,85,247,0.06); }
+.run-row1 { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.run-name { font-weight: 600; font-size: 14px; }
+.run-status { font-size: 11px; padding: 3px 8px; border-radius: 99px; font-weight: 600; }
+.run-status.running { background: rgba(34,211,238,0.14); color: #22d3ee; }
+.run-status.completed { background: rgba(34,197,94,0.14); color: #22c55e; }
+.run-status.failed { background: rgba(239,68,68,0.14); color: #ef4444; }
+.run-meta { display: flex; gap: 14px; margin-top: 6px; font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
+.run-reflection { color: #c084fc; font-weight: 600; }
+
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+@media (max-width: 700px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
+.metric { background: rgba(255,255,255,0.025); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px 16px; }
+.metric .l { font-size: 10.5px; color: var(--text-3); letter-spacing: 0.08em; text-transform: uppercase; }
+.metric .v { font-size: 24px; font-weight: 800; margin-top: 6px; letter-spacing: -0.01em; }
+.metric.positive .v { color: #22c55e; }
+.metric.negative .v { color: #ef4444; }
+.metric.neutral .v { color: var(--text); }
+
+.chart-wrap { background: rgba(255,255,255,0.02); border: 1px solid var(--line);
+  border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+.chart-title { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 12px;
+  text-transform: uppercase; letter-spacing: 0.08em; }
+.chart-canvas-box { position: relative; height: 240px; }
+
+.actions-bars { display: flex; flex-direction: column; gap: 8px; }
+.action-bar { display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.action-bar .lbl { width: 120px; color: var(--text-2); }
+.action-bar .track { flex: 1; height: 8px; background: rgba(255,255,255,0.05);
+  border-radius: 4px; overflow: hidden; }
+.action-bar .fill { height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #6366f1, #a855f7); }
+.action-bar .num { width: 42px; text-align: right; font-weight: 600;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); }
+
+.empty-state { padding: 40px 20px; text-align: center; color: var(--text-3); font-style: italic; }
+
+.toasts { position: fixed; right: 22px; bottom: 22px; display: flex;
+  flex-direction: column; gap: 10px; z-index: 100; }
+.toast { padding: 12px 18px; background: rgba(15,15,25,0.96);
+  border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; font-size: 13.5px;
+  box-shadow: 0 18px 50px -16px rgba(0,0,0,0.7); animation: toastIn .25s ease-out; }
+.toast.ok { border-left: 3px solid #22c55e; }
+.toast.err { border-left: 3px solid #ef4444; }
+.toast.warn { border-left: 3px solid #facc15; }
+@keyframes toastIn { from { opacity:0; transform:translateX(20px);} to {opacity:1; transform:translateX(0);} }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="./" class="brand"><img src="./logo.png" alt="Cloud Cost Optimizer"/></a>
+  <a href="./" class="back">← Back to main</a>
+</nav>
+
+<div class="wrap">
+  <div class="page-head">
+    <h1>Training Dashboard</h1>
+    <p>Run the autonomous LLM agent across multiple episodes and watch the learning curve in real time</p>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <div class="card" style="margin-bottom:18px;">
+        <h2>Start a new run</h2>
+        <div class="field">
+          <label>Run name (optional)</label>
+          <input type="text" id="runName" placeholder="e.g. baseline-30ep" />
+        </div>
+        <div class="field">
+          <label>Episodes</label>
+          <input type="number" id="episodes" value="30" min="1" max="200" />
+        </div>
+        <div class="field">
+          <label>Max steps per episode</label>
+          <input type="number" id="maxSteps" value="8" min="1" max="50" />
+        </div>
+        <div class="field">
+          <label class="toggle">
+            <input type="checkbox" id="reflection" />
+            <span class="toggle-text">
+              <strong>Reflection learning</strong>
+              <small>Agent learns from penalized decisions across episodes — past mistakes are injected as anti-examples into future prompts.</small>
+            </span>
+          </label>
+        </div>
+        <button class="btn-primary" id="startBtn">Start Training</button>
+      </div>
+
+      <div class="card">
+        <h2>Runs</h2>
+        <div class="runs-list" id="runsList">
+          <div class="empty-state">No runs yet. Start one above.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="detailPanel">
+      <div class="empty-state">Select a run on the left to view its metrics</div>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(() => {
+  'use strict';
+  const API_BASE = (window.CCO_API_BASE || window.location.origin).replace(/\/+$/, '');
+  const $ = (id) => document.getElementById(id);
+
+  function toast(msg, kind='ok') {
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.textContent = msg;
+    $('toasts').appendChild(el);
+    setTimeout(() => el.remove(), 3800);
+  }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: opts.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  let selectedRunId = null;
+  let rewardChart = null;
+  let confidenceChart = null;
+  let pollTimer = null;
+
+  $('startBtn').addEventListener('click', async () => {
+    const btn = $('startBtn');
+    btn.disabled = true; btn.textContent = 'Starting…';
+    try {
+      const resp = await api('/training/start', {
+        method: 'POST',
+        body: {
+          episodes: parseInt($('episodes').value) || 30,
+          max_steps_per_episode: parseInt($('maxSteps').value) || 8,
+          reflection_enabled: $('reflection').checked,
+          run_name: $('runName').value.trim() || null,
+        },
+      });
+      toast(`Run started: ${resp.run_id}`, 'ok');
+      $('runName').value = '';
+      selectedRunId = resp.run_id;
+      await refreshRuns();
+      showRun(resp.run_id);
+    } catch (e) {
+      toast(`Failed: ${e.message}`, 'err');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Start Training';
+    }
+  });
+
+  async function refreshRuns() {
+    try {
+      const runs = await api('/training/runs');
+      const list = $('runsList');
+      if (!runs.length) { list.innerHTML = '<div class="empty-state">No runs yet.</div>'; return; }
+      list.innerHTML = runs.map(r => {
+        const date = new Date(r.started_at * 1000).toLocaleString();
+        const sel = r.run_id === selectedRunId ? ' selected' : '';
+        return `
+          <div class="run-item${sel}" data-id="${r.run_id}">
+            <div class="run-row1">
+              <div class="run-name">${escapeHtml(r.run_name || r.run_id)}</div>
+              <div class="run-status ${r.status}">${r.status}</div>
+            </div>
+            <div class="run-meta">
+              <span>${r.episodes_completed}/${r.total_episodes} eps</span>
+              <span>avg: ${(r.avg_reward || 0).toFixed(2)}</span>
+              ${r.reflection_enabled ? '<span class="run-reflection">✦ reflection</span>' : ''}
+              <span>${date}</span>
+            </div>
+          </div>`;
+      }).join('');
+      list.querySelectorAll('.run-item').forEach(el => {
+        el.addEventListener('click', () => {
+          selectedRunId = el.dataset.id;
+          refreshRuns();
+          showRun(selectedRunId);
+        });
+      });
+    } catch (e) { console.error(e); }
+  }
+
+  async function showRun(runId) {
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    const panel = $('detailPanel');
+    try {
+      const [summary, episodes] = await Promise.all([
+        api(`/training/runs/${runId}`),
+        api(`/training/runs/${runId}/episodes`),
+      ]);
+      const totals = aggregateActions(episodes);
+      const fallbackPct = avg(summary.fallback_rate_per_episode) * 100;
+      const trend = computeTrend(summary.rewards);
+
+      panel.innerHTML = `
+        <h2>
+          ${escapeHtml(summary.run_name || summary.run_id)}
+          <span class="run-status ${summary.status}" style="font-size:11px;">${summary.status}</span>
+          ${summary.reflection_enabled ? '<span class="run-reflection" style="font-size:11px; padding:3px 8px; background:rgba(168,85,247,0.12); border-radius:99px;">✦ reflection</span>' : ''}
+        </h2>
+        <div class="metrics">
+          <div class="metric ${summary.avg_reward >= 0 ? 'positive' : 'negative'}">
+            <div class="l">Avg Reward</div>
+            <div class="v">${(summary.avg_reward || 0).toFixed(2)}</div>
+          </div>
+          <div class="metric neutral">
+            <div class="l">Episodes</div>
+            <div class="v">${summary.episodes_completed}/${summary.total_episodes}</div>
+          </div>
+          <div class="metric ${trend >= 0 ? 'positive' : 'negative'}">
+            <div class="l">Trend (Δ first→last)</div>
+            <div class="v">${trend >= 0 ? '+' : ''}${trend.toFixed(2)}</div>
+          </div>
+          <div class="metric neutral">
+            <div class="l">Fallback Rate</div>
+            <div class="v">${fallbackPct.toFixed(1)}%</div>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-title">Reward per Episode</div>
+          <div class="chart-canvas-box"><canvas id="rewardChart"></canvas></div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-title">Avg Confidence per Episode</div>
+          <div class="chart-canvas-box"><canvas id="confidenceChart"></canvas></div>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-title">Action Distribution (aggregate across all episodes)</div>
+          ${renderActionBars(totals)}
+        </div>
+      `;
+
+      drawRewardChart(summary.rewards);
+      drawConfidenceChart(summary.avg_confidence_per_episode);
+
+      if (summary.status === 'running') {
+        pollTimer = setTimeout(() => { refreshRuns(); showRun(runId); }, 2200);
+      }
+    } catch (e) {
+      panel.innerHTML = `<div class="empty-state">Failed to load run: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function aggregateActions(episodes) {
+    const counts = {};
+    for (const ep of episodes) {
+      if (!ep.action_distribution) continue;
+      for (const [k, v] of Object.entries(ep.action_distribution)) counts[k] = (counts[k] || 0) + v;
+    }
+    return counts;
+  }
+  function avg(arr) { return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+  function computeTrend(rewards) {
+    if (rewards.length < 4) return 0;
+    const half = Math.max(2, Math.floor(rewards.length / 3));
+    const first = rewards.slice(0, half);
+    const last = rewards.slice(-half);
+    return avg(last) - avg(first);
+  }
+  function renderActionBars(counts) {
+    const total = Object.values(counts).reduce((a,b)=>a+b,0) || 1;
+    const actions = ['terminate', 'resize', 'switch_pricing', 'skip'];
+    return `<div class="actions-bars">${actions.map(a => {
+      const n = counts[a] || 0;
+      const pct = (n / total) * 100;
+      return `
+        <div class="action-bar">
+          <div class="lbl">${a}</div>
+          <div class="track"><div class="fill" style="width:${pct.toFixed(1)}%"></div></div>
+          <div class="num">${n}</div>
+        </div>`;
+    }).join('')}</div>`;
+  }
+
+  function chartOpts(yMin, yMax) {
+    return {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { backgroundColor: 'rgba(15,15,25,0.95)' } },
+      scales: {
+        x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#6b6b80', font: { size: 11 } } },
+        y: { min: yMin, max: yMax, grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#6b6b80', font: { size: 11 } } },
+      },
+    };
+  }
+  function drawRewardChart(rewards) {
+    if (rewardChart) rewardChart.destroy();
+    const ctx = $('rewardChart').getContext('2d');
+    rewardChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: rewards.map((_, i) => i + 1),
+        datasets: [{
+          label: 'Reward', data: rewards,
+          borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.12)',
+          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#a855f7',
+        }],
+      },
+      options: chartOpts(undefined, undefined),
+    });
+  }
+  function drawConfidenceChart(confs) {
+    if (confidenceChart) confidenceChart.destroy();
+    const ctx = $('confidenceChart').getContext('2d');
+    confidenceChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: confs.map((_, i) => i + 1),
+        datasets: [{
+          label: 'Confidence', data: confs,
+          borderColor: '#22d3ee', backgroundColor: 'rgba(34,211,238,0.10)',
+          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#22d3ee',
+        }],
+      },
+      options: chartOpts(0, 1),
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  refreshRuns();
+  setInterval(refreshRuns, 5000);
+})();
+</script>
+</body>
+</html>
