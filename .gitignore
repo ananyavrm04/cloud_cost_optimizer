@@ -22,3 +22,12 @@ generated_client.py
 opus antigravity/
 ENHANCEMENTS.md
 FUNCTIONALITIES.md
+
+# Secrets — NEVER commit (LLM agent setup)
+.env.local
+*.key
+
+# Python envs
+.venv/
+venv/
+*.egg-info/

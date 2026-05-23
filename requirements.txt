@@ -4,4 +4,5 @@ uvicorn[standard]
 pydantic>=2.0
 openai
 requests
-python-dotenv
+litellm>=1.55.0
+python-dotenv>=1.0.0

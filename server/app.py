@@ -8,6 +8,9 @@ Usage (prod / Docker):
     uvicorn server.app:app --host 0.0.0.0 --port 7860
 """
 
+from dotenv import load_dotenv
+load_dotenv()  # MUST run before any code that reads env vars
+
 from openenv.core.env_server.http_server import create_app
 
 try:
@@ -49,6 +52,18 @@ def metadata() -> dict:
         "name": "cloud_cost_optimizer",
         "description": "Cloud cost optimization simulation environment.",
     }
+
+
+try:
+    from .agent import decide as _agent_decide, DecideRequest, DecideResponse
+except ImportError:
+    from server.agent import decide as _agent_decide, DecideRequest, DecideResponse
+
+
+@app.post("/agent/decide", response_model=DecideResponse)
+async def agent_decide_endpoint(req: DecideRequest) -> DecideResponse:
+    """LLM-powered action selection for the autonomous optimization cycle."""
+    return await _agent_decide(req)
 
 
 def main() -> None:
