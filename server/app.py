@@ -30,6 +30,14 @@ app = create_app(
 )
 
 
+# ── per-IP rate limiting (defense-in-depth on the public POST endpoints) ──
+try:
+    from .ratelimit import rate_limit_middleware
+except ImportError:
+    from server.ratelimit import rate_limit_middleware
+app.middleware("http")(rate_limit_middleware)
+
+
 @app.get("/health")
 def health_extended() -> dict:
     return {"status": "healthy", "name": "cloud_cost_optimizer"}

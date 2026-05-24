@@ -14,12 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .agent import (
@@ -33,6 +35,9 @@ log = logging.getLogger("cco.trainer")
 
 RUNS_DIR = Path("training_runs")
 RUNS_DIR.mkdir(exist_ok=True)
+
+# Cap simultaneous background runs so the endpoint can't be used to spawn a flood.
+MAX_CONCURRENT_RUNS = int(os.getenv("CCO_MAX_CONCURRENT_RUNS", "2"))
 
 # In-memory cache so polling is fast and doesn't always hit disk
 _active_runs: dict[str, "RunSummary"] = {}
@@ -232,6 +237,12 @@ async def _run_episode(env, req: StartTrainingRequest, episode_idx: int) -> Epis
 # ── public API ──────────────────────────────────────────────────────────────────
 async def start_training(req: StartTrainingRequest) -> StartTrainingResponse:
     """Start a background training run. Returns immediately with run_id."""
+    active = sum(1 for s in _active_runs.values() if s.status == "running")
+    if active >= MAX_CONCURRENT_RUNS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many concurrent training runs ({active}/{MAX_CONCURRENT_RUNS}). Wait for one to finish.",
+        )
     run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     summary = RunSummary(
         run_id=run_id,
