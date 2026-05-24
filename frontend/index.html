@@ -1885,7 +1885,7 @@ footer {
   }
 
   const api = {
-    health: () => apiFetch('/'),
+    health: () => apiFetch('/health'),
     reset:  () => apiFetch('/reset', { method: 'POST', body: {} }),
     state:  () => apiFetch('/state'),
     step:   (action) => apiFetch('/step', { method: 'POST', body: { action } }),

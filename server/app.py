@@ -29,13 +29,6 @@ app = create_app(
     max_concurrent_envs=1,
 )
 
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-
-_FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
-if _FRONTEND.exists():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND), html=True), name="frontend")
-
 
 @app.get("/health")
 def health_extended() -> dict:
@@ -97,6 +90,16 @@ def training_run_summary_endpoint(run_id: str):
 @app.get("/training/runs/{run_id}/episodes")
 def training_run_episodes_endpoint(run_id: str) -> list[dict]:
     return get_run_episodes(run_id)
+
+
+# ── static frontend ──
+# Mounted LAST so this catch-all ("/") never shadows the API routes defined above.
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+_FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+if _FRONTEND.exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND), html=True), name="frontend")
 
 
 def main() -> None:

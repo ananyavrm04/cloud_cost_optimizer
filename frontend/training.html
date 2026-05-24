@@ -5,43 +5,60 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Training Dashboard — Cloud Cost Optimizer</title>
 <link rel="icon" type="image/png" href="./favicon.png" />
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700;800;900&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 :root {
-  --bg: #050509; --panel: #0c0c16; --line: rgba(255,255,255,0.06);
-  --line-2: rgba(255,255,255,0.10);
-  --text: #e6e6f0; --text-2: #a0a0b3; --text-3: #6b6b80;
-  --blue: #3b82f6; --cyan: #22d3ee; --purple: #a855f7;
-  --green: #22c55e; --red: #ef4444; --yellow: #facc15;
+  /* carousel palette (matches the main site) */
+  --bistre: #210100; --goldfinch: #E6A341; --butter: #FECE79; --indian-red: #B14A36; --garnet: #8C0902;
+  --bg: #160803; --bg-2: #1d0b05; --panel: #241007; --panel-2: #2f160c;
+  --line: rgba(230,163,65,0.12);
+  --line-2: rgba(230,163,65,0.22);
+  --text: #f6e7d2; --text-2: #cdaa80; --text-3: #9a7a55;
+  --gold: #E6A341; --rust: #d96a4f;
+  --font-display: 'Playfair Display', Georgia, 'Times New Roman', serif;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+html { background: var(--bg); }
+html, body { margin: 0; padding: 0; color: var(--text);
   font-family: 'Manrope', system-ui, sans-serif; min-height: 100vh; }
+body {
+  background:
+    radial-gradient(ellipse 70% 55% at 15% 4%,  rgba(230,163,65,0.10), transparent 60%),
+    radial-gradient(ellipse 62% 50% at 85% 16%, rgba(140,9,2,0.20),   transparent 62%),
+    radial-gradient(ellipse 80% 60% at 50% 100%, rgba(177,74,54,0.12), transparent 66%),
+    var(--bg);
+  background-attachment: fixed;
+}
 a { color: inherit; text-decoration: none; }
 button { font-family: inherit; cursor: pointer; }
 
 .nav { display: flex; align-items: center; justify-content: space-between;
   padding: 14px 24px; border-bottom: 1px solid var(--line);
-  background: rgba(5,5,9,0.7); backdrop-filter: blur(18px) saturate(1.2);
+  background: rgba(22,10,4,0.7); backdrop-filter: blur(18px) saturate(1.2);
   position: sticky; top: 0; z-index: 10; }
-.nav .brand img { height: 36px; display: block; }
+.nav .brand img { height: 40px; display: block;
+  filter: drop-shadow(0 0 14px rgba(230,163,65,0.35)); }
 .nav a.back { color: var(--text-2); font-size: 14px; }
 .nav a.back:hover { color: var(--text); }
 
 .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
 
 .page-head { padding: 50px 0 36px; text-align: center; }
-.page-head h1 { margin: 0; font-size: 46px; font-weight: 800; letter-spacing: -0.03em;
-  background: linear-gradient(92deg, #60a5fa, #a855f7); -webkit-background-clip: text;
+.page-head h1 { margin: 0; font-size: 50px; font-weight: 800; letter-spacing: -0.02em;
+  font-family: var(--font-display);
+  background: linear-gradient(95deg, #FECE79, #E6A341 48%, #B14A36); -webkit-background-clip: text;
   background-clip: text; color: transparent; }
-.page-head p { color: var(--text-2); margin: 10px 0 0; font-size: 16px; }
+.page-head p { color: var(--text-2); margin: 12px 0 0; font-size: 16px; }
 
 .grid-2 { display: grid; grid-template-columns: 380px 1fr; gap: 22px; margin-bottom: 32px; }
 @media (max-width: 1000px) { .grid-2 { grid-template-columns: 1fr; } }
 
-.card { background: linear-gradient(180deg, #0c0c16, #08080f); border: 1px solid var(--line);
-  border-radius: 16px; padding: 24px; }
+.card { background: linear-gradient(180deg, #241007, #1a0a04); border: 1px solid var(--line);
+  border-radius: 16px; padding: 24px;
+  box-shadow: 0 1px 0 rgba(255,220,160,0.05) inset, 0 28px 70px -34px rgba(0,0,0,0.85); }
 .card h2 { margin: 0 0 18px; font-size: 18px; font-weight: 700; display: flex;
   align-items: center; gap: 10px; flex-wrap: wrap; }
 
@@ -50,34 +67,34 @@ button { font-family: inherit; cursor: pointer; }
 .field input[type="number"], .field input[type="text"] { width: 100%; padding: 11px 14px;
   background: rgba(255,255,255,0.03); border: 1px solid var(--line); border-radius: 10px;
   color: var(--text); font-family: inherit; font-size: 14px; }
-.field input:focus { outline: none; border-color: rgba(168,85,247,0.5); }
+.field input:focus { outline: none; border-color: rgba(230,163,65,0.55); }
 .toggle { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; padding: 12px 14px;
-  background: rgba(168,85,247,0.04); border: 1px solid rgba(168,85,247,0.18); border-radius: 10px;
+  background: rgba(230,163,65,0.05); border: 1px solid rgba(230,163,65,0.20); border-radius: 10px;
   transition: border-color .15s ease, background .15s ease; }
-.toggle:hover { border-color: rgba(168,85,247,0.35); background: rgba(168,85,247,0.07); }
-.toggle input { width: 16px; height: 16px; accent-color: #a855f7; margin-top: 2px; }
+.toggle:hover { border-color: rgba(230,163,65,0.4); background: rgba(230,163,65,0.09); }
+.toggle input { width: 16px; height: 16px; accent-color: #E6A341; margin-top: 2px; }
 .toggle-text { font-size: 14px; line-height: 1.4; }
 .toggle-text small { color: var(--text-3); display: block; margin-top: 4px; font-size: 12px; }
 
-.btn-primary { padding: 13px 22px; background: linear-gradient(120deg, #6366f1, #a855f7);
-  color: white; border: 0; border-radius: 10px; font-weight: 600; font-size: 14px;
+.btn-primary { padding: 13px 22px; background: linear-gradient(120deg, #B14A36, #E6A341);
+  color: #2a1206; border: 0; border-radius: 10px; font-weight: 700; font-size: 14px;
   width: 100%; transition: transform .15s ease, box-shadow .15s ease; }
-.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 32px -10px rgba(168,85,247,0.6); }
+.btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 32px -10px rgba(230,163,65,0.6); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .runs-list { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow-y: auto; }
 .run-item { padding: 14px 16px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);
   border-radius: 10px; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
-.run-item:hover { border-color: rgba(168,85,247,0.4); }
-.run-item.selected { border-color: #a855f7; background: rgba(168,85,247,0.06); }
+.run-item:hover { border-color: rgba(230,163,65,0.45); }
+.run-item.selected { border-color: #E6A341; background: rgba(230,163,65,0.07); }
 .run-row1 { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .run-name { font-weight: 600; font-size: 14px; }
 .run-status { font-size: 11px; padding: 3px 8px; border-radius: 99px; font-weight: 600; }
-.run-status.running { background: rgba(34,211,238,0.14); color: #22d3ee; }
-.run-status.completed { background: rgba(34,197,94,0.14); color: #22c55e; }
-.run-status.failed { background: rgba(239,68,68,0.14); color: #ef4444; }
+.run-status.running { background: rgba(254,206,121,0.14); color: #FECE79; }
+.run-status.completed { background: rgba(230,163,65,0.16); color: #E6A341; }
+.run-status.failed { background: rgba(177,74,54,0.18); color: #d96a4f; }
 .run-meta { display: flex; gap: 14px; margin-top: 6px; font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
-.run-reflection { color: #c084fc; font-weight: 600; }
+.run-reflection { color: #FECE79; font-weight: 600; }
 
 .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
 @media (max-width: 700px) { .metrics { grid-template-columns: repeat(2, 1fr); } }
@@ -85,8 +102,8 @@ button { font-family: inherit; cursor: pointer; }
   border-radius: 12px; padding: 14px 16px; }
 .metric .l { font-size: 10.5px; color: var(--text-3); letter-spacing: 0.08em; text-transform: uppercase; }
 .metric .v { font-size: 24px; font-weight: 800; margin-top: 6px; letter-spacing: -0.01em; }
-.metric.positive .v { color: #22c55e; }
-.metric.negative .v { color: #ef4444; }
+.metric.positive .v { color: #E6A341; }
+.metric.negative .v { color: #d96a4f; }
 .metric.neutral .v { color: var(--text); }
 
 .chart-wrap { background: rgba(255,255,255,0.02); border: 1px solid var(--line);
@@ -101,7 +118,7 @@ button { font-family: inherit; cursor: pointer; }
 .action-bar .track { flex: 1; height: 8px; background: rgba(255,255,255,0.05);
   border-radius: 4px; overflow: hidden; }
 .action-bar .fill { height: 100%; border-radius: 4px;
-  background: linear-gradient(90deg, #6366f1, #a855f7); }
+  background: linear-gradient(90deg, #B14A36, #E6A341); }
 .action-bar .num { width: 42px; text-align: right; font-weight: 600;
   font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); }
 
@@ -109,12 +126,12 @@ button { font-family: inherit; cursor: pointer; }
 
 .toasts { position: fixed; right: 22px; bottom: 22px; display: flex;
   flex-direction: column; gap: 10px; z-index: 100; }
-.toast { padding: 12px 18px; background: rgba(15,15,25,0.96);
-  border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; font-size: 13.5px;
+.toast { padding: 12px 18px; background: rgba(28,16,9,0.96);
+  border: 1px solid var(--line-2); border-radius: 10px; font-size: 13.5px;
   box-shadow: 0 18px 50px -16px rgba(0,0,0,0.7); animation: toastIn .25s ease-out; }
-.toast.ok { border-left: 3px solid #22c55e; }
-.toast.err { border-left: 3px solid #ef4444; }
-.toast.warn { border-left: 3px solid #facc15; }
+.toast.ok { border-left: 3px solid #E6A341; }
+.toast.err { border-left: 3px solid #d96a4f; }
+.toast.warn { border-left: 3px solid #FECE79; }
 @keyframes toastIn { from { opacity:0; transform:translateX(20px);} to {opacity:1; transform:translateX(0);} }
 </style>
 </head>
@@ -277,7 +294,7 @@ button { font-family: inherit; cursor: pointer; }
         <h2>
           ${escapeHtml(summary.run_name || summary.run_id)}
           <span class="run-status ${summary.status}" style="font-size:11px;">${summary.status}</span>
-          ${summary.reflection_enabled ? '<span class="run-reflection" style="font-size:11px; padding:3px 8px; background:rgba(168,85,247,0.12); border-radius:99px;">✦ reflection</span>' : ''}
+          ${summary.reflection_enabled ? '<span class="run-reflection" style="font-size:11px; padding:3px 8px; background:rgba(230,163,65,0.14); border-radius:99px;">✦ reflection</span>' : ''}
         </h2>
         <div class="metrics">
           <div class="metric ${summary.avg_reward >= 0 ? 'positive' : 'negative'}">
@@ -356,10 +373,10 @@ button { font-family: inherit; cursor: pointer; }
   function chartOpts(yMin, yMax) {
     return {
       responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: { backgroundColor: 'rgba(15,15,25,0.95)' } },
+      plugins: { legend: { display: false }, tooltip: { backgroundColor: 'rgba(28,16,9,0.96)' } },
       scales: {
-        x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#6b6b80', font: { size: 11 } } },
-        y: { min: yMin, max: yMax, grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#6b6b80', font: { size: 11 } } },
+        x: { grid: { color: 'rgba(230,163,65,0.06)' }, ticks: { color: '#9a7a55', font: { size: 11 } } },
+        y: { min: yMin, max: yMax, grid: { color: 'rgba(230,163,65,0.06)' }, ticks: { color: '#9a7a55', font: { size: 11 } } },
       },
     };
   }
@@ -372,8 +389,8 @@ button { font-family: inherit; cursor: pointer; }
         labels: rewards.map((_, i) => i + 1),
         datasets: [{
           label: 'Reward', data: rewards,
-          borderColor: '#a855f7', backgroundColor: 'rgba(168,85,247,0.12)',
-          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#a855f7',
+          borderColor: '#E6A341', backgroundColor: 'rgba(230,163,65,0.14)',
+          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#E6A341',
         }],
       },
       options: chartOpts(undefined, undefined),
@@ -388,8 +405,8 @@ button { font-family: inherit; cursor: pointer; }
         labels: confs.map((_, i) => i + 1),
         datasets: [{
           label: 'Confidence', data: confs,
-          borderColor: '#22d3ee', backgroundColor: 'rgba(34,211,238,0.10)',
-          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#22d3ee',
+          borderColor: '#d96a4f', backgroundColor: 'rgba(217,106,79,0.12)',
+          fill: true, tension: 0.3, pointRadius: 3, pointBackgroundColor: '#d96a4f',
         }],
       },
       options: chartOpts(0, 1),
