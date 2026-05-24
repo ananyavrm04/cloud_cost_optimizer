@@ -34,11 +34,7 @@ from fastapi.staticfiles import StaticFiles
 
 _FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 if _FRONTEND.exists():
-    app.mount("/ui", StaticFiles(directory=str(_FRONTEND), html=True), name="ui")
-
-@app.get("/")
-def health() -> dict:
-    return {"status": "ok", "environment": "cloud_cost_optimizer"}
+    app.mount("/", StaticFiles(directory=str(_FRONTEND), html=True), name="frontend")
 
 
 @app.get("/health")

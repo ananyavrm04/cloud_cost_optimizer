@@ -1825,7 +1825,7 @@ footer {
 (() => {
   'use strict';
 
-  const API_BASE = (window.CCO_API_BASE || 'http://localhost:7860').replace(/\/+$/, '');
+  const API_BASE = (window.CCO_API_BASE || window.location.origin).replace(/\/+$/, '');
   const FETCH_TIMEOUT_MS = 6000;
 
   // ──────────────────────── DOM refs ────────────────────────
