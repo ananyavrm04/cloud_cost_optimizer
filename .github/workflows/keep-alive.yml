@@ -9,4 +9,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Hugging Face Space
-                run: 'curl -s -o /dev/null -w "HTTP status: %{http_code}\n" https://ananyavrm28-cloud-cost-optimizer.hf.space'
+        run: 'curl -s -o /dev/null -w "HTTP status: %{http_code}\n" https://ananyavrm28-cloud-cost-optimizer.hf.space'
