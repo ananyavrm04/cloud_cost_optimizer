@@ -1,0 +1,12 @@
+name: Keep HF Space Alive
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Hugging Face Space
+        run: curl -s -o /dev/null -w "HTTP status: %{http_code}\n" https://ananyavrm28-cloud-cost-optimizer.hf.space
